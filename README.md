@@ -96,6 +96,11 @@ python notscan.py
 5. Review findings in **Scan Results** (severity, evidence, raw HTTP, diff, confirm flow)
    and export a report (MD / JSON / HTML / SARIF / DOCX).
 
+You can change the port at any time: edit the **Port** field and press the same
+**▶ Start Proxy + Browser** button — the proxy restarts on the new port and the browser
+opens (if a browser was already running, notscan asks for confirmation and closes it
+before restarting the proxy).
+
 The proxy stops automatically when the browser it launched is closed, after an idle timeout
 (`proxy_idle_stop_min`, default 15 min) and on application exit — the port is always
 released. Lifecycle settings are persisted per project:

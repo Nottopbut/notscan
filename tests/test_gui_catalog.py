@@ -442,3 +442,122 @@ def test_gui_run_probe_scan_fallback_legacy(monkeypatch):
     result = notscan.App._run_probe_scan(app, ["http://example.test/b"], ["metafiles"])
     assert result == 1
     assert captured["urls"] == ["http://example.test/b"]
+
+
+# ──────────── регресс: Start-кнопка и смена порта после авто-старта ────────────
+
+_RESTART_UX_SCRIPT = r"""
+import json, socket, time
+
+import notscan
+
+
+class FakeRunner:
+    def __init__(self, host="127.0.0.1", port=0, log_callback=None):
+        self.host = host
+        self.port = port
+        self.is_running = False
+        self.last_activity_ts = 0.0
+
+    def start(self):
+        self.is_running = True
+
+    def stop(self, wait=True):
+        self.is_running = False
+
+
+def free_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+# реальный mitmproxy не нужен: подменяем класс движка
+notscan.ProxyRunner = FakeRunner
+app = notscan.App()
+
+
+def pump(seconds=1.0):
+    end = time.time() + seconds
+    while time.time() < end:
+        app.update()
+        time.sleep(0.01)
+
+
+pump(0.4)
+app._proxy_shutdown_done = True  # не ждём реальный порт при выходе
+
+# 1) авто-старт (эмуляция) не должен блокировать кнопку Start
+ok_autostart = app._start_proxy(auto=True)
+pump(0.2)
+state_after_autostart = str(app._btn_start_proxy.cget("state"))
+
+# 2) клик при том же endpoint → просто открывается браузер (без рестарта)
+opened = {"n": 0}
+app._open_burp_browser = lambda: opened.__setitem__("n", opened["n"] + 1)
+app._start_proxy_and_browser()
+pump(0.5)
+opened_same = opened["n"]
+
+# 3) пользователь изменил порт и нажал ту же кнопку → рестарт + браузер
+new_port = free_port()
+app._proxy_port.set(new_port)
+app._start_proxy_and_browser()
+deadline = time.time() + 8.0
+while time.time() < deadline and opened["n"] < 2:
+    app.update()
+    time.sleep(0.01)
+
+result = {
+    "ok_autostart": ok_autostart,
+    "state_after_autostart": state_after_autostart,
+    "opened_same_endpoint": opened_same,
+    "opened_after_restart": opened["n"],
+    "expected_new_port": new_port,
+    "new_confirmed_port": app._proxy_confirmed_port,
+    "state_after_restart": str(app._btn_start_proxy.cget("state")),
+}
+
+app._proxy_shutdown_done = True
+try:
+    if app._proxy_runner is not None:
+        app._proxy_runner.stop(wait=True)
+except Exception:
+    pass
+try:
+    app.destroy()
+except Exception:
+    pass
+
+print("RESULT_JSON " + json.dumps(result))
+"""
+
+
+@pytest.mark.integration
+def test_gui_start_button_works_after_autostart_and_port_change(tmp_path):
+    """Авто-старт не блокирует Start; смена порта применяется по клику.
+
+    Регресс бага: после авто-старта прокси кнопка «Start Proxy + Browser»
+    оставалась disabled, порт нельзя было применить, браузер не открывался.
+    """
+    project = _copy_project(tmp_path)
+    data = _run_gui_script(
+        project, _RESTART_UX_SCRIPT, disable_proxy_autostart=True, timeout=180
+    )
+    assert data["ok_autostart"] is True
+    assert data["state_after_autostart"] == "normal", (
+        "после авто-старта кнопка Start заблокирована — пользователь не может "
+        "открыть браузер/сменить порт"
+    )
+    assert data["opened_same_endpoint"] == 1, (
+        "клик при запущенном прокси не открыл браузер"
+    )
+    assert data["opened_after_restart"] == 2, (
+        "после смены порта браузер не открылся (перезапуск прокси не сработал)"
+    )
+    assert data["new_confirmed_port"] == data["expected_new_port"], (
+        f"прокси не перезапустился на новом порту: {data}"
+    )
+    assert data["state_after_restart"] == "normal"

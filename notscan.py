@@ -1644,6 +1644,9 @@ class App(tk.Tk):
         self._proxy_watchdog_id = None
         self._idle_watchdog_ticks = 0
         self._proxy_confirmed_port: Optional[int] = None
+        self._proxy_confirmed_host: str = ""
+        self._proxy_starting = False
+        self._restart_thread: Optional[threading.Thread] = None
         self._proxy_shutdown_done = False
         self._scan_runner: Optional[scanner_core.ScannerRunner] = None
         # Фоновый поток построения/запуска задач и вспомогательные потоки скана
@@ -2578,6 +2581,8 @@ class App(tk.Tk):
 
     def _start_proxy(self, auto: bool = False) -> bool:
         """Запуск прокси. При занятом порте — авто-подбор, БЕЗ модалки-тупика."""
+        if self._proxy_starting:
+            return False
         host = (self._proxy_host.get() or "").strip() or "127.0.0.1"
         try:
             port = int(self._proxy_port.get())
@@ -2615,21 +2620,28 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-        self._proxy_runner = ProxyRunner(host=host, port=port, log_callback=self.log)
+        self._proxy_starting = True
         try:
-            self._proxy_runner.start()
-        except Exception as exc:
-            self.log(f"[PROXY][ERR] failed to start proxy: {exc}")
-            self._set_proxy_status("● STOPPED (start failed)", running=False)
-            return False
+            self._proxy_runner = ProxyRunner(host=host, port=port, log_callback=self.log)
+            try:
+                self._proxy_runner.start()
+            except Exception as exc:
+                self.log(f"[PROXY][ERR] failed to start proxy: {exc}")
+                self._set_proxy_status("● STOPPED (start failed)", running=False)
+                return False
 
-        self._proxy_confirmed_port = port
-        try:
-            self._btn_start_proxy.configure(state=tk.DISABLED)
-        except Exception:
-            pass
-        self._set_proxy_status(f"● RUNNING :{port}", running=True)
-        return True
+            self._proxy_confirmed_port = port
+            self._proxy_confirmed_host = host
+            self._set_proxy_status(f"● RUNNING :{port}", running=True)
+            # Start-кнопка всегда доступна: если прокси уже запущен, она открывает
+            # браузер (а при изменённом порте — перезапускает прокси на новом порту).
+            try:
+                self._btn_start_proxy.configure(state=tk.NORMAL)
+            except Exception:
+                pass
+            return True
+        finally:
+            self._proxy_starting = False
 
     def _maybe_autostart_proxy(self) -> None:
         """after(300): авто-старт прокси при запуске App (settings proxy_autostart)."""
@@ -2645,18 +2657,123 @@ class App(tk.Tk):
         if self._proxy_runner is not None and self._proxy_runner.is_running:
             return
         self.log("[PROXY] auto-starting proxy…")
-        self._start_proxy(auto=True)
+        ok = self._start_proxy(auto=True)
+        if ok:
+            self.log(
+                "[PROXY] Прокси запущен автоматически. Нажми «▶ Start Proxy + Browser», "
+                "чтобы открыть браузер; порт можно изменить в поле Port и нажать ту же кнопку."
+            )
+        else:
+            self.log(
+                "[PROXY][ERR] Авто-старт прокси не удался — нажми «▶ Start Proxy + Browser» для повтора."
+            )
 
     def _start_proxy_and_browser(self) -> None:
-        """One-click: start proxy (если ещё не запущен) + open Burp Browser."""
-        if not (self._proxy_runner and self._proxy_runner.is_running):
+        """One-click: прокси (запуск/перезапуск при смене порта) + открыть браузер.
+
+        Кнопка никогда не блокируется: если прокси уже запущен на том же
+        endpoint — просто открываем браузер; если пользователь изменил
+        host/port — перезапускаем прокси на новом порту и открываем браузер.
+        """
+        try:
+            host = (self._proxy_host.get() or "").strip() or "127.0.0.1"
+            port = int(self._proxy_port.get())
+            if not (1 <= port <= 65535):
+                raise ValueError
+        except (TypeError, ValueError):
+            mb.showerror("Proxy", "Некорректный host/port прокси")
+            return
+
+        running = bool(self._proxy_runner and self._proxy_runner.is_running)
+        if not running:
             if not self._start_proxy(auto=False):
                 return
             # дать прокси подняться до запуска браузера (без блокировки UI)
-            self.after(1000, self._open_burp_browser)
-        else:
-            self.log("[PROXY] already running — launching browser only")
+            self.after(700, self._open_burp_browser)
+            return
+
+        current_host = self._proxy_confirmed_host or host
+        current_port = self._proxy_confirmed_port
+        endpoint_changed = bool(current_port) and (host, port) != (current_host, current_port)
+        if not endpoint_changed:
+            self.log(f"[PROXY] already running on {host}:{port} — launching browser only")
             self._open_burp_browser()
+            return
+
+        if self._browser_proc is not None and self._browser_proc.poll() is None:
+            if not mb.askyesno(
+                "Proxy",
+                f"Прокси уже запущен на {current_host}:{current_port}.\n"
+                f"Закрыть браузер и перезапустить прокси на {host}:{port}?",
+            ):
+                # вернуть поля к фактическому endpoint, чтобы не путать
+                try:
+                    self._proxy_host.delete(0, tk.END)
+                    self._proxy_host.insert(0, current_host)
+                    self._proxy_port.set(current_port)
+                except Exception:
+                    pass
+                return
+            self._terminate_browser()
+
+        self.log(f"[PROXY] switching {current_host}:{current_port} → {host}:{port} (restart)")
+        self._set_proxy_status(f"● RESTARTING → :{port}", running=False)
+        try:
+            self._btn_start_proxy.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        # Останавливаем прокси в фоне (сеть/сокеты), затем стартуем на новом
+        # endpoint УЖЕ В GUI-ПОТОКЕ (Tkinter не потокобезопасен).
+        runner = self._proxy_runner
+        self._restart_thread = threading.Thread(
+            target=self._stop_for_restart, args=(runner,), daemon=True,
+            name="proxy-restart-stop",
+        )
+        self._restart_thread.start()
+        self.after(100, self._wait_restart)
+
+    def _stop_for_restart(self, runner) -> None:
+        try:
+            if runner is not None:
+                runner.stop(wait=True)
+        except Exception:
+            pass
+
+    def _wait_restart(self) -> None:
+        thread = getattr(self, "_restart_thread", None)
+        if thread is not None and thread.is_alive():
+            self.after(100, self._wait_restart)
+            return
+        ok = self._start_proxy(auto=False)
+        self._restart_done(ok)
+
+    def _restart_done(self, ok: bool) -> None:
+        try:
+            self._btn_start_proxy.configure(state=tk.NORMAL)
+        except Exception:
+            pass
+        if ok:
+            self.after(700, self._open_burp_browser)
+        else:
+            self._set_proxy_status("● STOPPED (restart failed)", running=False)
+            self.log("[PROXY][ERR] restart failed — проверь host/port и попробуй ещё раз")
+
+    def _terminate_browser(self) -> None:
+        """Закрыть браузер, запущенный приложением (для смены порта прокси)."""
+        proc = self._browser_proc
+        self._browser_proc = None
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                proc.kill()
+            self.log("[BROWSER] closed for proxy restart")
+        except Exception as exc:
+            logger.debug("browser terminate failed: %s", exc)
 
     def _stop_proxy(self, reason: str = "manual") -> None:
         """Приватная остановка (кнопки Stop в UI больше нет)."""
