@@ -283,12 +283,21 @@ def insert_history(
         return cur.lastrowid
 
 
-def fetch_history(limit: int = 500) -> list:
+def fetch_history(limit: int = 500, offset: int = 0) -> list:
+    """Записи history (ORDER BY id DESC) с пагинацией."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM history ORDER BY id DESC LIMIT ?", (limit,)
+            "SELECT * FROM history ORDER BY id DESC LIMIT ? OFFSET ?",
+            (int(limit), max(0, int(offset))),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def count_history() -> int:
+    """Общее число записей history (для пагинации/счётчика)."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM history").fetchone()
+    return int(row["n"] if row else 0)
 
 
 def fetch_history_refs(limit: int = 10000, offset: int = 0) -> list:

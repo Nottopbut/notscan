@@ -1396,8 +1396,8 @@ TUTORIAL_STEPS = [
         "text": "Notscan перехватывает твой HTTP-трафик через прокси, затем мутирует запросы и ищет уязвимости (SQLi, XSS, SSRF, XXE, JWT и др.).\n\nПройди 7 шагов — и сможешь пользоваться им сам.",
     },
     {
-        "title": "Шаг 1/7: Открой браузер (прокси уже работает)",
-        "text": "Прокси запускается автоматически при старте приложения и перехватывает трафик браузера — все запросы попадают в History. Нажми кнопку ниже или «▶ Start Proxy + Browser» на вкладке Proxy/Scan, чтобы открыть браузер.\n\nПрокси остановится сам: когда закроешь браузер, после простоя (Settings) или при закрытии приложения.",
+        "title": "Шаг 1/7: Запусти прокси и открой браузер",
+        "text": "Прокси НЕ запускается сам при старте приложения: нажми кнопку ниже или «▶ Start Proxy + Browser» на вкладке Proxy/Scan — прокси поднимется и откроет браузер, все запросы попадут в History.\n\nПрокси остановится сам: когда закроешь браузер, после простоя (Settings) или при закрытии приложения.",
         "hint": "Панель «Proxy» → кнопка «▶ Start Proxy + Browser». Отдельной кнопки Stop нет — всё автоматически.",
         "action": "_start_proxy_and_browser",
         "action_label": "▶ Открыть браузер через прокси",
@@ -1659,6 +1659,9 @@ class App(tk.Tk):
         self._proxy_runner: Optional[ProxyRunner] = None
         # Авто-жизненный цикл прокси
         self._browser_proc: Optional[subprocess.Popen] = None
+        self._browser_open_pending = False
+        self._history_offset = 0
+        self._history_page = 500
         self._proxy_watchdog_id = None
         self._idle_watchdog_ticks = 0
         self._proxy_confirmed_port: Optional[int] = None
@@ -1742,7 +1745,7 @@ class App(tk.Tk):
 
         self.log(
             "Добро пожаловать! Как пользоваться:\n"
-            "  1) Прокси запускается автоматически (статус в панели Proxy)\n"
+            "  1) Прокси не запускается сам — нажми «▶ Start Proxy + Browser» (статус в панели Proxy)\n"
             "  2) «▶ Start Proxy + Browser» — открыть браузер через прокси\n"
             "  3) В History выдели запросы → «＋ Add to Scan list»\n"
             "  4) «▶ Run Scan» — результаты во вкладке Results\n"
@@ -2050,6 +2053,12 @@ class App(tk.Tk):
         ttk.Button(hist_toolbar, text="🗑 Clear history", command=self._clear_history).pack(side=tk.LEFT, padx=4)
         ttk.Button(hist_toolbar, text="🧹 Clear browser noise",
                    command=self._clear_browser_noise).pack(side=tk.LEFT, padx=4)
+        self._btn_load_more_history = ttk.Button(
+            hist_toolbar, text="⬇ Load more history",
+            command=self._load_more_history)
+        self._btn_load_more_history.pack(side=tk.LEFT, padx=4)
+        self._history_count_lbl = ttk.Label(hist_toolbar, text="History: 0 / 0")
+        self._history_count_lbl.pack(side=tk.LEFT, padx=8)
 
         # Host/URL search — quick endpoint lookup by host/substring
         hist_search = ttk.Frame(hist_frame)
@@ -2771,6 +2780,18 @@ class App(tk.Tk):
                 mb.showerror("Error", "Invalid proxy port")
                 return False
 
+        if not (1 <= int(port) <= 65535):
+            if auto:
+                self.log(f"[PROXY] некорректный порт {port} → используем 8080")
+                port = 8080
+                try:
+                    self._proxy_port.set(port)
+                except Exception:
+                    pass
+            else:
+                mb.showerror("Error", "Invalid proxy port (1-65535)")
+                return False
+
         if self._proxy_runner is not None and self._proxy_runner.is_running:
             return True
 
@@ -2870,8 +2891,9 @@ class App(tk.Tk):
         if not running:
             if not self._start_proxy(auto=False):
                 return
-            # дать прокси подняться до запуска браузера (без блокировки UI)
-            self.after(700, self._open_burp_browser)
+            # дать прокси подняться до запуска браузера (без блокировки UI);
+            # повторные клики не открывают второй браузер
+            self._schedule_browser_open()
             return
 
         current_host = self._proxy_confirmed_host or host
@@ -2936,7 +2958,7 @@ class App(tk.Tk):
         except Exception:
             pass
         if ok:
-            self.after(700, self._open_burp_browser)
+            self._schedule_browser_open()
         else:
             self._set_proxy_status("● STOPPED (restart failed)", running=False)
             self.log("[PROXY][ERR] restart failed — проверь host/port и попробуй ещё раз")
@@ -3103,7 +3125,27 @@ class App(tk.Tk):
         except Exception:
             return 18080
 
+    def _schedule_browser_open(self, delay_ms: int = 700) -> None:
+        """Отложенный запуск браузера с защитой от двойного клика."""
+        if getattr(self, "_browser_open_pending", False):
+            self.log("[BROWSER] Открытие браузера уже запланировано — повторный клик проигнорирован")
+            return
+        self._browser_open_pending = True
+        self.after(int(delay_ms), self._open_burp_browser_scheduled)
+
+    def _open_burp_browser_scheduled(self) -> None:
+        self._browser_open_pending = False
+        self._open_burp_browser()
+
+    def _launch_browser_process(self, args: list) -> subprocess.Popen:
+        """Запуск процесса браузера (отдельный метод — для тестов/подмены)."""
+        return subprocess.Popen(args)
+
     def _open_burp_browser(self) -> None:
+        # Защита: второй браузер через тот же прокси не открываем.
+        if self._browser_proc is not None and self._browser_proc.poll() is None:
+            self.log("[BROWSER] Браузер уже запущен — второй экземпляр не открываю")
+            return
         host = self._proxy_host.get().strip() or "127.0.0.1"
         try:
             port = int(self._proxy_port.get())
@@ -3229,7 +3271,7 @@ class App(tk.Tk):
         try:
             # Popen сохраняем: watchdog каждые 2с проверит, не закрылся ли
             # браузер, и авто-остановит прокси (settings proxy_stop_on_browser_exit).
-            self._browser_proc = subprocess.Popen(args)
+            self._browser_proc = self._launch_browser_process(args)
             self.log(f"[BROWSER] Launched: {executable.name} → proxy={proxy}")
             self.log(f"[BROWSER] Profile: {profile_dir}")
             self.log("[BROWSER] При закрытии браузера прокси остановится автоматически")
@@ -3550,7 +3592,14 @@ class App(tk.Tk):
 
         threading.Thread(target=_bg, daemon=True).start()
 
-    def _refresh_history(self) -> None:
+    def _refresh_history(self, reset: bool = True) -> None:
+        """Перерисовывает History; reset=True — с первой страницы.
+
+        Показываем окно (offset + page), чтобы «Load more» догружал старые
+        записи без потери уже выбранного и без обрезки на 500.
+        """
+        if reset:
+            self._history_offset = 0
         selected = set(self._history_tree.selection())
         for row in self._history_tree.get_children():
             self._history_tree.delete(row)
@@ -3558,7 +3607,9 @@ class App(tk.Tk):
             flt = (getattr(self, "_history_filter", None).get() or "").strip().lower()
         except Exception:
             flt = ""
-        records = db.fetch_history(limit=500)
+        page = int(getattr(self, "_history_page", 500) or 500)
+        loaded = int(getattr(self, "_history_offset", 0) or 0) + page
+        records = db.fetch_history(limit=loaded)
         for r in records:
             url = r.get("url") or ""
             if flt and flt not in url.lower():
@@ -3583,6 +3634,38 @@ class App(tk.Tk):
             self._last_hist_id = db.latest_history_id()
         except Exception:
             pass
+        try:
+            total = db.count_history()
+        except Exception:
+            total = 0
+        try:
+            shown = len(self._history_tree.get_children())
+        except Exception:
+            shown = 0
+        try:
+            self._history_count_lbl.configure(text=f"History: {shown} / {total}")
+        except Exception:
+            pass
+        try:
+            self._btn_load_more_history.configure(
+                state=(tk.DISABLED if loaded >= total else tk.NORMAL)
+            )
+        except Exception:
+            pass
+
+    def _load_more_history(self) -> None:
+        """Догружает следующую страницу History (сохраняя фильтр/выделение)."""
+        page = int(getattr(self, "_history_page", 500) or 500)
+        try:
+            total = db.count_history()
+        except Exception:
+            total = 0
+        loaded = int(getattr(self, "_history_offset", 0) or 0) + page
+        if loaded >= total:
+            self._refresh_history(reset=False)
+            return
+        self._history_offset = loaded
+        self._refresh_history(reset=False)
 
     def _auto_refresh_loop(self) -> None:
         """Фоновое автообновление History и Results (без кнопки Refresh)."""
@@ -3590,11 +3673,11 @@ class App(tk.Tk):
             h = db.latest_history_id()
             if h != getattr(self, "_last_hist_id", -1):
                 self._last_hist_id = h
-                self._refresh_history()
+                self._refresh_history(reset=False)
             r = db.latest_scan_result_id()
             if r != getattr(self, "_last_res_id", -1):
                 self._last_res_id = r
-                self._refresh_results()
+                self._refresh_results(reset=False)
         except Exception:
             pass
         try:
@@ -3811,7 +3894,7 @@ class App(tk.Tk):
             self._check_vars.get(cid, tk.BooleanVar(value=False)).get()
             for cid in self._check_vars
         ):
-            mb.showinfo("Scan", "No checks selected — toggle at least one badge ON")
+            mb.showinfo("Скан", "Не выбрано ни одной проверки — включи хотя бы один чек (☐ → ☑) в окне скана")
             return
 
         try:
@@ -4580,7 +4663,7 @@ def _patch_app_with_auth_and_revshell(app: "App") -> None:
         for row in _login_tree.get_children():
             _login_tree.delete(row)
         try:
-            rows = db.fetch_history(limit=500)
+            rows = db.fetch_history(limit=5000)
         except Exception as e:
             app.log(f"[AUTH] history error: {e}")
             return
@@ -4791,7 +4874,7 @@ def _patch_app_with_auth_and_revshell(app: "App") -> None:
             return
         import json as _j
         try:
-            rows = db.fetch_history(limit=500)
+            rows = db.fetch_history(limit=5000)
         except Exception:
             return
         best = None
