@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
@@ -97,6 +99,18 @@ class AuthConfig:
 
     # ── Задержка между попытками (сек) ──
     retry_delay: float = 1.0
+
+    # ── OTP / 2FA (task-25) ──
+    # Имя поля/заголовка, куда подставляется одноразовый код.
+    otp_field: str = "otp"
+    # Маркеры «сервер требует OTP» в ответе на логин (text/JSON keys).
+    otp_required_markers: tuple[str, ...] = (
+        "otp", "2fa", "two-factor", "verification code", "one-time",
+    )
+    # Сколько раз пробовать отправить OTP-код за один login().
+    otp_attempts: int = 1
+    # Тестовая заглушка (или env NOTSCAN_OTP_STUB): код без GUI-провайдера.
+    otp_test_stub: str = ""
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -192,6 +206,10 @@ class SessionManager:
         # если auth.login_url не задан (анонимный скан).
         self._last_url: Optional[str] = None
 
+        # OTP/2FA provider (задаёт GUI): blocking callable -> code | None.
+        # Сам SessionManager Tk-диалоги не показывает (важно для воркеров).
+        self._otp_provider: Optional[Callable[[], Optional[str]]] = None
+
         # httpx client (общий для всех запросов)
         kw = dict(
             verify=False,
@@ -244,11 +262,20 @@ class SessionManager:
             return False
 
         if resp.status_code not in self.auth.success_codes:
-            self.log_cb(
-                f"[SESSION][ERR] Login returned {resp.status_code}, "
-                f"expected one of {self.auth.success_codes}"
-            )
-            return False
+            if self._response_requires_otp(resp):
+                self.log_cb(
+                    "[SESSION] OTP/2FA required by login response — requesting code"
+                )
+                otp_resp = self._login_with_otp(resp)
+                if otp_resp is None:
+                    return False
+                resp = otp_resp
+            else:
+                self.log_cb(
+                    f"[SESSION][ERR] Login returned {resp.status_code}, "
+                    f"expected one of {self.auth.success_codes}"
+                )
+                return False
 
         # Extract cookies
         with self._lock:
@@ -282,26 +309,41 @@ class SessionManager:
         )
         return True
 
-    def _do_login_request(self) -> httpx.Response:
-        """Формирует и выполняет логин-запрос."""
+    def _do_login_request(self, otp_code: Optional[str] = None) -> httpx.Response:
+        """Формирует и выполняет логин-запрос (с OTP-кодом, если передан).
+
+        OTP добавляется как поле формы/JSON (`auth.otp_field`). Для raw-тела:
+        подставляется ``{otp}``-placeholder, иначе код уходит заголовком X-OTP.
+        """
         headers = dict(self.auth.extra_headers)
+        body: dict = dict(self.auth.body or {})
+        if otp_code:
+            body[self.auth.otp_field] = otp_code
 
         if self.auth.content_type == "json":
             resp = self._client.request(
                 method=self.auth.method,
                 url=self.auth.login_url,
-                json=self.auth.body,
+                json=body,
                 headers=headers,
             )
         elif self.auth.content_type == "form":
             resp = self._client.request(
                 method=self.auth.method,
                 url=self.auth.login_url,
-                data=self.auth.body,
+                data=body,
                 headers=headers,
             )
         else:  # raw
-            raw_body = self.auth.body.get("raw", "")
+            raw_body = str(body.get("raw", ""))
+            if otp_code:
+                if "{otp}" in raw_body:
+                    raw_body = raw_body.replace("{otp}", otp_code)
+                elif raw_body:
+                    raw_body = raw_body + "&" + urllib.parse.urlencode(
+                        {self.auth.otp_field: otp_code}
+                    )
+                headers.setdefault("X-OTP", otp_code)
             resp = self._client.request(
                 method=self.auth.method,
                 url=self.auth.login_url,
@@ -309,6 +351,111 @@ class SessionManager:
                 headers=headers,
             )
         return resp
+
+    # ── OTP / 2FA (task-25) ──────────────────────────────────────
+
+    def set_otp_provider(self, provider: Optional[Callable[[], Optional[str]]]) -> None:
+        """Задать провайдер OTP/2FA (bound method/closure из GUI или тестов).
+
+        Провайдер — blocking callable без Tk-диалогов: для воркеров GUI кладёт
+        туда чтение уже введённого кода. None — провайдер отключён.
+        """
+        self._otp_provider = provider
+
+    @staticmethod
+    def _otp_stub_from_env() -> str:
+        return (os.environ.get("NOTSCAN_OTP_STUB") or "").strip()
+
+    def _obtain_otp_code(self) -> Optional[str]:
+        """Код OTP: env-заглушка → auth.otp_test_stub → provider. Иначе None."""
+        stub = self._otp_stub_from_env() or (self.auth.otp_test_stub or "").strip()
+        if stub:
+            self.log_cb("[SESSION] OTP: using configured test stub")
+            return stub
+        provider = self._otp_provider
+        if provider is None:
+            return None
+        try:
+            value = provider()
+        except Exception as exc:
+            self.log_cb(f"[SESSION][ERR] OTP provider failed: {exc}")
+            return None
+        code = str(value).strip() if value else ""
+        return code or None
+
+    def _response_requires_otp(self, resp: httpx.Response) -> bool:
+        """True, если ответ логина просит OTP/2FA (маркеры в text/JSON)."""
+        markers = tuple(
+            str(m).lower()
+            for m in (getattr(self.auth, "otp_required_markers", ()) or ())
+        )
+        if not markers:
+            return False
+        text = (getattr(resp, "text", "") or "").lower()
+        if any(marker in text for marker in markers):
+            return True
+        try:
+            data = resp.json()
+        except Exception:
+            return False
+
+        def _walk(node, depth: int = 0) -> bool:
+            if depth > 5:
+                return False
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if any(marker in str(key).lower() for marker in markers):
+                        return True
+                    if _walk(value, depth + 1):
+                        return True
+                return False
+            if isinstance(node, list):
+                return any(_walk(item, depth + 1) for item in node)
+            if isinstance(node, str):
+                return any(marker in node.lower() for marker in markers)
+            return False
+
+        try:
+            return _walk(data)
+        except Exception:
+            return False
+
+    def _login_with_otp(self, first_resp: httpx.Response) -> Optional[httpx.Response]:
+        """Повторный login с OTP-кодом. Возвращает успешный response или None."""
+        attempts = max(1, int(getattr(self.auth, "otp_attempts", 1) or 1))
+        code = self._obtain_otp_code()
+        if not code:
+            self.log_cb(
+                "[SESSION][WARN] OTP required, but provider/test-stub returned "
+                "empty code — login failed"
+            )
+            return None
+        resp = first_resp
+        for attempt in range(1, attempts + 1):
+            self.log_cb(
+                f"[SESSION] OTP required → submitting code "
+                f"(attempt {attempt}/{attempts})"
+            )
+            try:
+                resp = self._do_login_request(otp_code=code)
+            except Exception as exc:
+                self.log_cb(f"[SESSION][ERR] OTP login request failed: {exc}")
+                return None
+            if resp.status_code in self.auth.success_codes:
+                self.log_cb("[SESSION] OTP accepted — login OK")
+                return resp
+            if not self._response_requires_otp(resp):
+                self.log_cb(
+                    f"[SESSION][ERR] OTP login rejected ({resp.status_code})"
+                )
+                return None
+            if attempt < attempts:
+                code = self._obtain_otp_code() or code
+        self.log_cb(
+            f"[SESSION][ERR] OTP login failed after {attempts} attempt(s) "
+            f"({getattr(resp, 'status_code', '?')})"
+        )
+        return None
 
     # ── Refresh token ─────────────────────────────────────────────
 
@@ -570,6 +717,8 @@ def auth_config_from_dict(d: dict) -> AuthConfig:
                 value = set(value)
             elif field_name == "unauth_codes":
                 value = set(value)
+            elif field_name == "otp_required_markers":
+                value = tuple(str(v) for v in value)
             setattr(cfg, field_name, value)
     return cfg
 
@@ -594,6 +743,10 @@ def auth_config_to_dict(cfg: AuthConfig) -> dict:
         "refresh_body_template": cfg.refresh_body_template,
         "max_relogin_attempts": cfg.max_relogin_attempts,
         "retry_delay": cfg.retry_delay,
+        "otp_field": cfg.otp_field,
+        "otp_required_markers": list(cfg.otp_required_markers),
+        "otp_attempts": cfg.otp_attempts,
+        "otp_test_stub": cfg.otp_test_stub,
     }
 
 

@@ -244,7 +244,11 @@ result = {
     "has_stop_proxy": any(
         ("stop" in t.lower() and "proxy" in t.lower()) for t in buttons
     ),
-    "has_stop_scan": any("stop scan" in t.lower() for t in buttons),
+    "has_stop_scan": any(
+        ("stop scan" in t.lower())
+        or (("стоп" in t.lower() or "останов" in t.lower()) and "скан" in t.lower())
+        for t in buttons
+    ),
     "has_proxy_settings": all(
         hasattr(app, name)
         for name in ("_proxy_autostart_var", "_proxy_stop_on_browser_exit_var",

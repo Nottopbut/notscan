@@ -22,10 +22,11 @@ Technical log lines ([SCAN]/[PROXY]/...) are intentionally NOT translated.
 
 from __future__ import annotations
 
+import os
 import tkinter
 import tkinter.messagebox as _tk_messagebox
 
-DEFAULT_LANGUAGE = "en"
+DEFAULT_LANGUAGE = "ru"
 LANGUAGES: tuple[str, ...] = ("en", "ru")
 LANGUAGE_LABELS: dict[str, str] = {"en": "English", "ru": "Русский"}
 
@@ -728,6 +729,52 @@ _RAW_MESSAGES: tuple[tuple[str, str], ...] = (
     ("Failed to import: {error}", "Не удалось импортировать: {error}"),
     ("Path segments", "Path-сегменты"),
     ("Multipart form-data", "Multipart-форма"),
+    # ─────────────────────────── RPS/delay, scope, auth/OTP, preflight ───────────────────────────
+    ("Min RPS:", "Min RPS:"),
+    ("Max RPS:", "Max RPS:"),
+    ("Delay (ms):", "Delay (мс):"),
+    (
+        "Max RPS limits speed; Min+Max = random interval 1/max..1/min; "
+        "Delay = fixed pause between requests.",
+        "Max RPS ограничивает скорость; Min+Max задают случайный интервал "
+        "1/max..1/min; Delay — фиксированная пауза между запросами.",
+    ),
+    ("Scope", "Scope"),
+    (
+        "Цель — локальный/приватный адрес: {hosts}.\n"
+        "Разрешить запросы к ней в этом скане?",
+        "Target is a local/private address: {hosts}.\n"
+        "Allow requests to it for this scan?",
+    ),
+    ("OTP / 2FA code:", "OTP / 2FA код:"),
+    ("(test stub 000000)", "(тест-заглушка 000000)"),
+    (
+        "If OTP/2FA is required: enter the code in the Auth tab (test stub 000000).",
+        "Если требуется OTP/2FA: введи код во вкладке Auth (тест-заглушка 000000).",
+    ),
+    ("Auth preflight", "Preflight авторизации"),
+    (
+        "It looks like you are not authorized: {url} returned {status}. "
+        "Continue the scan anyway?{otp}",
+        "Похоже, ты не авторизован: {url} вернул {status}. Продолжить скан?{otp}",
+    ),
+    (
+        "Настроить авто-логин из этой коллекции ({method} {url})?",
+        "Configure auto-login from this collection ({method} {url})?",
+    ),
+    ("Auto-login configured: {method} {url}", "Авто-логин настроен: {method} {url}"),
+    (
+        "Postman auth applied ({names}) — Cookie/Authorization added to imported "
+        "requests and probe headers.",
+        "Auth из Postman применена ({names}) — Cookie/Authorization добавлены к "
+        "импортированным запросам и probe-заголовкам.",
+    ),
+    (
+        "{count} responses with 401/403 — the session may have expired or "
+        "authorization is needed; check Cookie/OTP/auto-login.",
+        "{count} ответов с 401/403 — возможно, сессия истекла или нужна "
+        "авторизация; проверь Cookie/OTP/авто-логин.",
+    ),
 )
 
 import re as _re
@@ -801,6 +848,21 @@ def normalize_language(value) -> str:
         return "en"
     if raw in ("rus", "russian", "ru-ru", "ru_ru"):
         return "ru"
+    return DEFAULT_LANGUAGE
+
+
+def resolve_language(settings=None, environ=None) -> str:
+    """Стартовый язык: env NOTSCAN_UI_LANGUAGE → settings.ui_language → default.
+
+    Используется App при запуске (D — русский по умолчанию).
+    """
+    env = (environ if environ is not None else os.environ).get("NOTSCAN_UI_LANGUAGE")
+    if env is not None and str(env).strip():
+        return normalize_language(env)
+    if settings:
+        value = settings.get("ui_language")
+        if value:
+            return normalize_language(value)
     return DEFAULT_LANGUAGE
 
 

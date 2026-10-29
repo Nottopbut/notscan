@@ -148,3 +148,17 @@ HTTP-методы. Используется unit- и интеграционны�
 - Импорт Postman: при неразрешённых `{{переменных}}` GUI показывает их список и предлагает
   загрузить env-файл (кнопка «⬆ Import environment»); переменные коллекции и окружения
   подставляются в URL/headers/body; env — только на сессию.
+
+## Rate limiting, scope и авторизация
+
+- Scan Config → Advanced: Workers, **Min RPS**, **Max RPS**, **Delay (ms)**; пейсинг
+  глобальный (AsyncRateLimiter), диапазон 1/max…1/min.
+- Scope: хосты из Scan list автоматически попадают в allowlist (localhost/private
+  разрешены явной авторизацией); приватная цель подтверждается один раз; пропуски
+  агрегируются в логе (`[SCOPE] Skipped N…`), per-request спама нет.
+- Авторизация: Cookie/Authorization из импортированной Postman-коллекции/env
+  применяются к записям и probe-extra-headers; login-запрос → авто-логин
+  SessionManager; preflight-проверка перед сканом (401/403/login-redirect) и
+  post-scan предупреждение; OTP/2FA в Auth tab (`000000` — тестовая заглушка),
+  авто-relogin обновляет Cookie/токен при истечении сессии.
+- Язык: русский по умолчанию, переключение RU/EN в Settings (после перезапуска).

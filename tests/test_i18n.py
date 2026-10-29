@@ -26,7 +26,7 @@ class TestCatalog(unittest.TestCase):
         i18n.set_language(self._lang)
 
     def test_supported_languages(self):
-        self.assertEqual(i18n.DEFAULT_LANGUAGE, "en")
+        self.assertEqual(i18n.DEFAULT_LANGUAGE, "ru")
         self.assertEqual(i18n.available_languages(), ("en", "ru"))
         self.assertEqual(i18n.LANGUAGE_LABELS["en"], "English")
         self.assertEqual(i18n.LANGUAGE_LABELS["ru"], "Русский")
@@ -71,8 +71,15 @@ class TestTranslation(unittest.TestCase):
         self.assertEqual(i18n.normalize_language("RU"), "ru")
         self.assertEqual(i18n.normalize_language("ru-RU"), "ru")
         self.assertEqual(i18n.normalize_language("english"), "en")
-        self.assertEqual(i18n.normalize_language(None), "en")
-        self.assertEqual(i18n.normalize_language("gibberish"), "en")
+        self.assertEqual(i18n.normalize_language(None), "ru")
+        self.assertEqual(i18n.normalize_language("gibberish"), "ru")
+        # D: стартовый язык — env override → settings → RU default
+        self.assertEqual(
+            i18n.resolve_language({}, environ={"NOTSCAN_UI_LANGUAGE": "en"}), "en")
+        self.assertEqual(
+            i18n.resolve_language({"ui_language": "en"}, environ={}), "en")
+        self.assertEqual(i18n.resolve_language({}, environ={}), "ru")
+        self.assertEqual(i18n.resolve_language(None, environ={}), "ru")
         self.assertEqual(i18n.language_label("ru"), "Русский")
 
     def test_ru_to_en_by_default(self):

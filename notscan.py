@@ -10,6 +10,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -122,6 +123,23 @@ def parse_extra_headers(value) -> list[tuple[str, str]]:
             continue
         pairs.append((name, header_value))
     return pairs
+
+
+def _is_private_or_local_host(host: str) -> bool:
+    """localhost/private/loopback/metadata host — для одноразового confirm."""
+    host = (host or "").strip().lower().strip("[]")
+    if not host:
+        return False
+    if host in ("localhost", "localhost.localdomain", "0.0.0.0", "::1"):
+        return True
+    if host.endswith(".localhost") or host.endswith(".local") or host.endswith(".internal"):
+        return True
+    try:
+        import ipaddress
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return bool(ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved)
 
 
 def parse_csv_names(value) -> list[str]:
@@ -1753,6 +1771,28 @@ class ScanConfigWindow(tk.Toplevel):
         ttk.Spinbox(opt, from_=1, to=50, width=6,
                     textvariable=p._workers_var).pack(side=tk.LEFT)
 
+        # Rate limiting: Min/Max RPS + фиксированный Delay.
+        rate = ttk.Frame(adv)
+        rate.pack(fill=tk.X, padx=8, pady=2)
+        ttk.Label(rate, text="Min RPS:").pack(side=tk.LEFT, padx=(0, 2))
+        self._roe_min_rps_entry = ttk.Entry(
+            rate, textvariable=p._roe_min_rps_var, width=6)
+        self._roe_min_rps_entry.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(rate, text="Max RPS:").pack(side=tk.LEFT, padx=(0, 2))
+        self._roe_max_rps_entry_new = ttk.Entry(
+            rate, textvariable=p._roe_max_rps_var, width=6)
+        self._roe_max_rps_entry_new.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(rate, text="Delay (ms):").pack(side=tk.LEFT, padx=(0, 2))
+        self._roe_delay_ms_entry = ttk.Entry(
+            rate, textvariable=p._roe_delay_ms_var, width=6)
+        self._roe_delay_ms_entry.pack(side=tk.LEFT)
+        ttk.Label(
+            adv,
+            text="Max RPS limits speed; Min+Max = random interval 1/max..1/min; "
+                 "Delay = fixed pause between requests.",
+            foreground="#a6adc8", wraplength=700, justify="left",
+        ).pack(anchor="w", padx=10)
+
         ttk.Checkbutton(
             adv, text="Safe mode (exclude destructive payloads: DROP/INSERT/UPDATE/exec)",
             variable=p._safe_mode_var,
@@ -2120,6 +2160,14 @@ class App(tk.Tk):
         self._scan_list: dict[int, dict] = {}   # history_id → record
         # Postman environment для {{var}} при импорте коллекций (только сессия).
         self._postman_env: dict[str, str] = {}
+        # Auth-заголовки из последнего Postman-импорта (Cookie/Authorization).
+        self._postman_auth_headers: dict[str, str] = {}
+        # OTP/2FA код из Auth tab (провайдер для SessionManager).
+        self._otp_code_var = tk.StringVar(value="")
+        # Одноразовый confirm для private/localhost целей (на сессию).
+        self._private_scope_approved = False
+        # Очередь «спросить из GUI-потока» для фоновых проверок (preflight auth).
+        self._ui_ask_queue: "queue.Queue" = queue.Queue()
         self._proxy_runner: Optional[ProxyRunner] = None
         # Авто-жизненный цикл прокси
         self._browser_proc: Optional[subprocess.Popen] = None
@@ -2161,6 +2209,10 @@ class App(tk.Tk):
         self._mut_cookies = tk.BooleanVar(value=True)
         self._mut_path = tk.BooleanVar(value=True)
         self._mut_multipart = tk.BooleanVar(value=True)
+        # Rate limiting (Advanced): 0/пусто = off. Новые поля — primary.
+        self._roe_min_rps_var = tk.StringVar(value="0")
+        self._roe_max_rps_var = tk.StringVar(value="0")
+        self._roe_delay_ms_var = tk.StringVar(value="0")
         self._safe_mode_var = tk.BooleanVar(value=True)
         self._planner_var = tk.BooleanVar(value=True)
         # Tamper/WAF-bypass: payload-кодирование (TAMPER_MODES из templating).
@@ -2182,7 +2234,8 @@ class App(tk.Tk):
         self._settings: dict = ui_theme.load_settings(self._project_dir)
         # i18n: язык читаем ДО построения UI; messagebox-хуки — один раз.
         i18n.install_messagebox_hooks()
-        i18n.set_language(self._settings.get("ui_language", i18n.DEFAULT_LANGUAGE))
+        # D: RU по умолчанию; env NOTSCAN_UI_LANGUAGE перекрывает settings.
+        i18n.set_language(i18n.resolve_language(self._settings))
         self._theme_mode = (self._settings.get("theme_mode") or "dark").lower()
         self._tokens = ui_theme.get_tokens(self._theme_mode)
         self.configure(bg=self._tokens.app_bg)
@@ -3174,8 +3227,27 @@ class App(tk.Tk):
             if var is not None:
                 out["scope_block_private"] = bool(var.get())
             entry = getattr(self, "_roe_max_rps_entry", None)
-            if entry is not None:
-                out["roe_max_rps"] = (entry.get() or "0").strip()
+            old_max = (entry.get() or "0").strip() if entry is not None else "0"
+            out["roe_max_rps"] = old_max
+            for _key, _attr in (
+                ("min_rps", "_roe_min_rps_var"),
+                ("max_rps", "_roe_max_rps_var"),
+                ("delay_ms", "_roe_delay_ms_var"),
+            ):
+                var = self.__dict__.get(_attr)
+                if var is not None:
+                    out[_key] = (var.get() or "0").strip()
+            # Единый источник: новое Max RPS поле синхронизируем в старое Settings-поле.
+            new_max_var = self.__dict__.get("_roe_max_rps_var")
+            if entry is not None and new_max_var is not None:
+                new_value = str(new_max_var.get() or "").strip()
+                if new_value:
+                    try:
+                        entry.delete(0, tk.END)
+                        entry.insert(0, new_value)
+                        out["roe_max_rps"] = new_value
+                    except Exception:
+                        pass
             entry = getattr(self, "_roe_block_checks_entry", None)
             if entry is not None:
                 out["roe_block_checks"] = (entry.get() or "").strip()
@@ -3214,6 +3286,275 @@ class App(tk.Tk):
             return parse_extra_headers(self._probe_extra_headers_var.get())
         except Exception:
             return []
+
+    @staticmethod
+    def _parse_nonneg_float(value, default: float = 0.0) -> float:
+        """float >= 0 из текстового поля; мусор/пусто/минус → default."""
+        try:
+            number = float(str(value if value is not None else "").strip() or 0)
+        except (TypeError, ValueError):
+            return float(default)
+        return float(number) if number >= 0 else float(default)
+
+    def _rate_limit_values(self) -> tuple[float, float, float]:
+        """(min_rps, max_rps, delay_ms) из Advanced; 0 = off.
+
+        Новые поля — primary; если Max RPS не задан, используем старое
+        Settings→ROE «Max requests/sec» (обратная совместимость).
+        """
+        _vars = self.__dict__
+        min_rps = self._parse_nonneg_float(
+            _vars["_roe_min_rps_var"].get() if "_roe_min_rps_var" in _vars else 0)
+        max_rps = self._parse_nonneg_float(
+            _vars["_roe_max_rps_var"].get() if "_roe_max_rps_var" in _vars else 0)
+        delay_ms = self._parse_nonneg_float(
+            _vars["_roe_delay_ms_var"].get() if "_roe_delay_ms_var" in _vars else 0)
+        if max_rps <= 0:
+            old_entry = getattr(self, "_roe_max_rps_entry", None)
+            if old_entry is not None:
+                try:
+                    max_rps = self._parse_nonneg_float(old_entry.get())
+                except Exception:
+                    pass
+        if min_rps > 0 and max_rps > 0 and min_rps > max_rps:
+            min_rps = max_rps
+        return min_rps, max_rps, delay_ms
+
+    # ── OTP / Auth providers ──
+
+    def _otp_provider(self) -> str:
+        """Актуальный OTP/2FA код: поле Auth tab, иначе env NOTSCAN_OTP_STUB."""
+        value = ""
+        try:
+            value = str(self._otp_code_var.get() or "").strip()
+        except Exception:
+            value = ""
+        if not value:
+            value = (os.environ.get("NOTSCAN_OTP_STUB") or "").strip()
+        return value
+
+    def _bind_otp_provider(self, mgr) -> None:
+        """Подключить OTP-провайдер к SessionManager (если метод уже есть)."""
+        if mgr is None:
+            return
+        setter = getattr(mgr, "set_otp_provider", None)
+        if callable(setter):
+            try:
+                setter(self._otp_provider)
+                self.log("[AUTH] OTP provider connected")
+            except Exception as exc:
+                self.log(f"[AUTH][WARN] set_otp_provider failed: {exc}")
+
+    # ── Postman auth (Cookie/Authorization) и автологин ──
+
+    def _postman_auth_from_collection(self, path, variables) -> dict:
+        """Auth-заголовки Postman-коллекции через collection_io (getattr/fallback)."""
+        try:
+            import collection_io
+            fn = getattr(collection_io, "postman_auth_headers", None)
+            if not callable(fn):
+                return {}
+            try:
+                headers = fn(path, variables=variables)
+            except TypeError:
+                headers = fn(path)
+            if isinstance(headers, dict):
+                return {
+                    str(k): str(v) for k, v in headers.items()
+                    if str(k).strip() and str(v).strip()
+                }
+        except Exception as exc:
+            self.log(f"[IMPORT][WARN] postman_auth_headers: {exc}")
+        return {}
+
+    def _postman_login_from_collection(self, path, variables) -> dict | None:
+        """Login-candidate Postman-коллекции (для авто-логина) или None."""
+        try:
+            import collection_io
+            fn = getattr(collection_io, "postman_login_request", None)
+            if not callable(fn):
+                return None
+            try:
+                candidate = fn(path, variables=variables)
+            except TypeError:
+                candidate = fn(path)
+            if isinstance(candidate, dict) and candidate.get("url"):
+                return candidate
+        except Exception as exc:
+            self.log(f"[IMPORT][WARN] postman_login_request: {exc}")
+        return None
+
+    @staticmethod
+    def _merge_headers_into_records(records: list[dict], headers: dict) -> list[dict]:
+        """Добавить auth-заголовки в записи, где их ещё нет (не перетирая свои)."""
+        merged_records = []
+        for rec in records:
+            rec = dict(rec)
+            rec_headers = {
+                str(k): str(v) for k, v in (rec.get("headers") or {}).items()
+            }
+            existing = {name.lower() for name in rec_headers}
+            for name, value in headers.items():
+                if name.lower() not in existing:
+                    rec_headers[name] = value
+            rec["headers"] = rec_headers
+            merged_records.append(rec)
+        return merged_records
+
+    def _merge_auth_into_probe_headers(self, headers: dict) -> None:
+        """Добавить Cookie/Authorization в probe_extra_headers (если ещё нет)."""
+        try:
+            current = self._probe_extra_headers_var.get() or ""
+            existing = {name.lower() for name, _val in parse_extra_headers(current)}
+            lines = [ln for ln in str(current).splitlines() if ln.strip()]
+            for name, value in headers.items():
+                if name.lower() not in existing:
+                    lines.append(f"{name}: {value}")
+            self._probe_extra_headers_var.set("\n".join(lines))
+            try:
+                self._save_proxy_settings()
+            except Exception:
+                pass
+            self.log(
+                "[IMPORT] Auth headers added to probe_extra_headers: "
+                f"{sorted(headers.keys())}"
+            )
+        except Exception as exc:
+            self.log(f"[IMPORT][WARN] probe auth headers: {exc}")
+
+    def _setup_autologin_from_postman(self, candidate: dict) -> bool:
+        """Создать SessionManager/AuthConfig из login-candidate Postman."""
+        try:
+            from session_manager import AuthConfig, SessionManager
+        except Exception as exc:
+            self.log(f"[AUTH][WARN] session_manager недоступен: {exc}")
+            return False
+        try:
+            max_rel = 3
+            try:
+                max_rel = int(
+                    str(getattr(self, "_max_relogin_entry", None).get() or "3").strip() or "3"
+                )
+            except Exception:
+                max_rel = 3
+            cfg = AuthConfig(
+                enabled=True,
+                login_url=str(candidate.get("url") or ""),
+                method=str(candidate.get("method") or "POST").upper(),
+                body=dict(candidate.get("body") or {}),
+                content_type=str(candidate.get("content_type") or "form"),
+                extra_headers={
+                    str(k): str(v) for k, v in (candidate.get("headers") or {}).items()
+                },
+                success_codes={200, 302},
+                unauth_codes={401, 403},
+                max_relogin_attempts=max_rel,
+            )
+            mgr = SessionManager(auth_config=cfg, log_callback=self.log)
+            self._session_manager = mgr
+            self._bind_otp_provider(mgr)
+            try:
+                self._settings["postman_autologin_url"] = cfg.login_url
+                self._save_proxy_settings()
+            except Exception:
+                pass
+            self.log(
+                f"[AUTH] Auto-login configured from Postman: {cfg.method} {cfg.login_url}"
+            )
+            return True
+        except Exception as exc:
+            self.log(f"[AUTH][WARN] auto-login setup failed: {exc}")
+            return False
+
+    @staticmethod
+    def _preflight_looks_unauth(status_code, response_headers, response_text) -> bool:
+        """401/403 или redirect на login, или в теле форма логина."""
+        if status_code in (401, 403):
+            return True
+        headers_low = {str(k).lower(): str(v) for k, v in (response_headers or {}).items()}
+        location = headers_low.get("location", "").lower()
+        if status_code in (301, 302, 303, 307, 308) and any(
+            marker in location
+            for marker in ("login", "signin", "sign-in", "signon", "sso", "auth")
+        ):
+            return True
+        text = (response_text or "").lower()
+        if 'type="password"' in text or "type='password'" in text:
+            if "<form" in text:
+                return True
+        return False
+
+    def _ask_yesno_threadsafe(self, title: str, message: str, timeout: float = 120.0) -> bool:
+        """mb.askyesno из фонового потока: очередь → GUI-поток → результат."""
+        result: dict = {}
+        done = threading.Event()
+        self._ui_ask_queue.put((title, message, result, done))
+        if not done.wait(timeout):
+            return True  # не блокируем скан навсегда
+        return bool(result.get("ok", True))
+
+    def _drain_ui_asks(self) -> None:
+        """Выполнить отложенные askyesno в GUI-потоке (вызывается из auto-refresh)."""
+        while True:
+            try:
+                title, message, result, done = self._ui_ask_queue.get_nowait()
+            except queue.Empty:
+                return
+            except Exception:
+                return
+            try:
+                result["ok"] = bool(mb.askyesno(title, message))
+            except Exception:
+                result["ok"] = True
+            finally:
+                done.set()
+
+    def _preflight_auth(self, history_ids) -> bool:
+        """Preflight 401/login-redirect перед сканом; False = пользователь отменил.
+
+        Выполняется в фоновом потоке скана; диалог — через self.after + wait-event.
+        Пустой scan-list/сетевая ошибка — не блокируем скан.
+        """
+        try:
+            if not history_ids:
+                return True
+            rec = self._scan_list.get(history_ids[0]) or {}
+            url = str(rec.get("url") or "")
+            if not url:
+                return True
+            import json as _json
+            try:
+                headers = _json.loads(rec.get("req_headers") or "{}")
+            except Exception:
+                headers = {}
+            import httpx
+            with httpx.Client(verify=False, timeout=5.0, follow_redirects=False) as client:
+                resp = client.get(url, headers=headers)
+            if not self._preflight_looks_unauth(
+                resp.status_code, dict(resp.headers), resp.text[:20000]
+            ):
+                return True
+            otp_hint = ""
+            try:
+                if not self._otp_provider():
+                    otp_hint = "\n" + i18n.tr(
+                        "If OTP/2FA is required: enter the code in the Auth tab "
+                        "(test stub 000000)."
+                    )
+            except Exception:
+                otp_hint = ""
+            return self._ask_yesno_threadsafe(
+                i18n.tr("Auth preflight"),
+                i18n.tr(
+                    "It looks like you are not authorized: {url} returned "
+                    "{status}. Continue the scan anyway?{otp}",
+                    url=url, status=resp.status_code, otp=otp_hint,
+                ),
+                timeout=120.0,
+            )
+        except Exception as exc:
+            self.log(f"[SCAN][AUTH] preflight skipped: {exc}")
+            return True
 
     def _scan_host_headers(self) -> list[str] | None:
         """Заголовки для host-header-injection probe: список или None (дефолт)."""
@@ -3266,7 +3607,9 @@ class App(tk.Tk):
         settings = dict(getattr(self, "_settings", {}) or {})
 
         def _set_var(attr: str, value) -> None:
-            var = getattr(self, attr, None)
+            # __dict__: не задеваем Tk.__getattr__ для отсутствующих атрибутов
+            # (unit-тесты используют App.__new__ без полного __init__).
+            var = self.__dict__.get(attr)
             if var is None or value is None:
                 return
             try:
@@ -3275,7 +3618,7 @@ class App(tk.Tk):
                 pass
 
         def _set_entry(attr: str, value) -> None:
-            widget = getattr(self, attr, None)
+            widget = self.__dict__.get(attr)
             if widget is None or value is None:
                 return
             try:
@@ -3298,7 +3641,11 @@ class App(tk.Tk):
         _set_entry("_scope_allowlist_entry", settings.get("scope_allowlist", ""))
         _set_var("_scope_block_private_var",
                  bool(settings.get("scope_block_private", True)))
-        _set_entry("_roe_max_rps_entry", settings.get("roe_max_rps", "0"))
+        _old_max = str(settings.get("roe_max_rps", "0") or "0").strip() or "0"
+        _set_entry("_roe_max_rps_entry", _old_max)
+        _set_var("_roe_min_rps_var", str(settings.get("min_rps", "0") or "0"))
+        _set_var("_roe_max_rps_var", str(settings.get("max_rps", _old_max) or _old_max))
+        _set_var("_roe_delay_ms_var", str(settings.get("delay_ms", "0") or "0"))
         _set_entry("_roe_block_checks_entry",
                    settings.get("roe_block_checks",
                                 "file_upload,ssrf,xxe,deserialization"))
@@ -3612,6 +3959,16 @@ class App(tk.Tk):
         except Exception as exc:
             logger.debug("browser terminate failed: %s", exc)
 
+    @staticmethod
+    def _translate_stop_reason(reason: str) -> str:
+        """RU/EN-текст причины авто-стопа (сырой reason хранится как есть)."""
+        text = str(reason or "")
+        if text.startswith("idle "):
+            parts = text.split()
+            minutes = parts[1] if len(parts) > 1 else ""
+            return i18n.tr("idle {minutes} min", minutes=minutes)
+        return i18n.tr(text)
+
     def _stop_proxy(self, reason: str = "manual") -> None:
         """Приватная остановка (кнопки Stop в UI больше нет)."""
         runner = self._proxy_runner
@@ -3631,7 +3988,7 @@ class App(tk.Tk):
             self._set_proxy_status(
                 i18n.tr(
                     "● STOPPED ({reason}){suffix}",
-                    reason=i18n.tr(reason), suffix=suffix,
+                    reason=self._translate_stop_reason(reason), suffix=suffix,
                 ),
                 running=False,
             )
@@ -3650,7 +4007,10 @@ class App(tk.Tk):
             pass
         suffix = i18n.tr(" — port :{port} free", port=port) if port else ""
         self._set_proxy_status(
-            i18n.tr("● STOPPED ({reason}){suffix}", reason=i18n.tr(reason), suffix=suffix),
+            i18n.tr(
+                "● STOPPED ({reason}){suffix}",
+                reason=self._translate_stop_reason(reason), suffix=suffix,
+            ),
             running=False,
         )
 
@@ -3673,7 +4033,7 @@ class App(tk.Tk):
             return
         if self._proxy_runner is not None and self._proxy_runner.is_running:
             self.log("[PROXY] browser closed — stopping proxy automatically")
-            self._auto_stop_proxy(i18n.tr("browser closed"))
+            self._auto_stop_proxy("browser closed")
         else:
             self._set_proxy_status(i18n.tr("● STOPPED (browser closed)"), running=False)
 
@@ -3693,9 +4053,7 @@ class App(tk.Tk):
         if should_idle_stop(check_now, last_activity, minutes):
             idle_label = int(minutes) if minutes == int(minutes) else minutes
             self.log(f"[PROXY] idle for ≥{idle_label} min — stopping proxy automatically")
-            self._auto_stop_proxy(
-                i18n.tr("idle {minutes} min", minutes=idle_label)
-            )
+            self._auto_stop_proxy(f"idle {idle_label} min")
 
     def _proxy_watchdog_tick(self) -> None:
         """Периодический watchdog: браузер (2с) и idle (60с)."""
@@ -4327,6 +4685,10 @@ class App(tk.Tk):
     def _auto_refresh_loop(self) -> None:
         """Фоновое автообновление History и Results (без кнопки Refresh)."""
         try:
+            self._drain_ui_asks()
+        except Exception:
+            pass
+        try:
             h = db.latest_history_id()
             if h != getattr(self, "_last_hist_id", -1):
                 self._last_hist_id = h
@@ -4589,6 +4951,11 @@ class App(tk.Tk):
                 i18n.tr("No requests found in the file"),
             )
             return
+        # C: Cookie/Authorization из Postman — применяем к импортируемым записям.
+        auth_headers = self._postman_auth_from_collection(path, variables)
+        if auth_headers:
+            self._postman_auth_headers.update(auth_headers)
+            records = self._merge_headers_into_records(records, auth_headers)
         imported = 0
         for rec in records:
             try:
@@ -4624,6 +4991,49 @@ class App(tk.Tk):
                 i18n.tr("Import"),
                 i18n.tr("Imported {count} request(s)", count=imported),
             )
+
+        # C: auth для probe-чеков + предложение авто-логина из login-candidate.
+        if auth_headers:
+            self._merge_auth_into_probe_headers(auth_headers)
+            self.log(
+                f"[IMPORT] Postman auth applied: {sorted(auth_headers.keys())}"
+            )
+            mb.showinfo(
+                i18n.tr("Import"),
+                i18n.tr(
+                    "Postman auth applied ({names}) — Cookie/Authorization added "
+                    "to imported requests and probe headers.",
+                    names=", ".join(sorted(auth_headers.keys())),
+                ),
+            )
+        login_candidate = self._postman_login_from_collection(path, variables)
+        if login_candidate:
+            try:
+                candidate_url = str(login_candidate.get("url") or "")
+                candidate_method = str(login_candidate.get("method") or "POST").upper()
+                setup = mb.askyesno(
+                    i18n.tr("Auth"),
+                    i18n.tr(
+                        "Настроить авто-логин из этой коллекции ({method} {url})?",
+                        method=candidate_method, url=candidate_url,
+                    ),
+                )
+            except Exception:
+                setup = False
+            if setup and self._setup_autologin_from_postman(login_candidate):
+                mb.showinfo(
+                    i18n.tr("Auth"),
+                    i18n.tr(
+                        "Auto-login configured: {method} {url}",
+                        method=candidate_method, url=candidate_url,
+                    ),
+                )
+                refresh = getattr(self, "_refresh_session_view", None)
+                if callable(refresh):
+                    try:
+                        refresh()
+                    except Exception:
+                        pass
 
     def _export_collection(self) -> None:
         """Экспорт выбранных запросов History в коллекцию (Postman или raw HTTP)."""
@@ -4834,10 +5244,51 @@ class App(tk.Tk):
             if removed:
                 self.log(f"[ROE] Blocked checks removed: {sorted(removed)}")
 
+        # ── Scope: hosts целей → allowlist; один confirm для private/localhost ──
+        target_hosts: list[str] = []
+        for _hid in history_ids:
+            try:
+                _host = urlparse((self._scan_list.get(_hid) or {}).get("url") or "").hostname or ""
+            except Exception:
+                _host = ""
+            if _host and _host not in target_hosts:
+                target_hosts.append(_host)
+        private_targets = [h for h in target_hosts if _is_private_or_local_host(h)]
+        if private_targets and not getattr(self, "_private_scope_approved", False):
+            allow_private = mb.askyesno(
+                i18n.tr("Scope"),
+                i18n.tr(
+                    "Цель — локальный/приватный адрес: {hosts}.\n"
+                    "Разрешить запросы к ней в этом скане?",
+                    hosts=", ".join(private_targets[:5]),
+                ),
+            )
+            if not allow_private:
+                self.log("[SCAN] Cancelled — private/local target not allowed by user")
+                return
+            self._private_scope_approved = True
+            self.log(f"[SCAN] Private/local targets allowed for this session: {private_targets}")
+        explicit_allowlist: list[str] = []
+        try:
+            _scope_raw = (getattr(self, "_scope_allowlist_entry", None).get() or "").strip()
+            if _scope_raw:
+                explicit_allowlist = [s.strip() for s in _scope_raw.split(",") if s.strip()]
+        except Exception:
+            explicit_allowlist = []
+        effective_allowlist: list[str] = []
+        for _entry in explicit_allowlist + target_hosts:
+            if _entry and _entry not in effective_allowlist:
+                effective_allowlist.append(_entry)
+
         self.log(f"[SCAN] Building tasks for {len(history_ids)} request(s), checks: {enabled_checks}")
 
         # Build tasks in background to avoid freezing GUI
         def _build_and_run():
+            # C: preflight авторизации (не блокирует при сетевой ошибке/пустом списке).
+            if not self._preflight_auth(history_ids):
+                self.log("[SCAN] Cancelled after auth preflight warning")
+                self.after(0, self._scan_finished)
+                return
             # Диагностика тела запросов перед построением задач
             for hid in history_ids:
                 rec = db.fetch_history_by_id(hid)
@@ -5053,30 +5504,41 @@ class App(tk.Tk):
                     port = 8080
                 _proxy_url = f"http://{host}:{port}"
 
-            scope_allowlist_str = getattr(
-                self, "_scope_allowlist_entry", None
-            )
-            scope_allowlist = []
-            if scope_allowlist_str and getattr(scope_allowlist_str, "get", None):
-                raw = (scope_allowlist_str.get() or "").strip()
-                if raw:
-                    scope_allowlist = [s.strip() for s in raw.split(",") if s.strip()]
             scope_block_private = getattr(
                 self, "_scope_block_private_var", tk.BooleanVar(value=True)
             ).get()
 
+            _runner_kwargs = dict(
+                tasks=tasks,
+                workers=workers,
+                log_callback=self.log,
+                proxy_url=_proxy_url,
+                session_manager=getattr(self, "_session_manager", None),
+                scope_allowlist=effective_allowlist if effective_allowlist else None,
+                scope_block_private=scope_block_private,
+                stop_on_session_drift=getattr(
+                    self, "_roe_stop_on_session_drift", tk.BooleanVar(value=True)
+                ).get(),
+            )
             try:
-                self._scan_runner = scanner_core.ScannerRunner(
-                    tasks=tasks,
-                    workers=workers,
-                    log_callback=self.log,
-                    proxy_url=_proxy_url,
-                    session_manager=getattr(self, "_session_manager", None),
-                    scope_allowlist=scope_allowlist if scope_allowlist else None,
-                    scope_block_private=scope_block_private,
-                    max_rps=float((getattr(self, "_roe_max_rps_entry", None).get() or "0").strip() or 0.0),
-                    stop_on_session_drift=getattr(self, "_roe_stop_on_session_drift", tk.BooleanVar(value=True)).get(),
+                import inspect as _inspect_runner
+                _runner_params = set(
+                    _inspect_runner.signature(
+                        scanner_core.ScannerRunner.__init__
+                    ).parameters
                 )
+            except (TypeError, ValueError):
+                _runner_params = set()
+            _min_rps, _max_rps, _delay_ms = self._rate_limit_values()
+            if "max_rps" in _runner_params:
+                _runner_kwargs["max_rps"] = float(_max_rps)
+            if "min_rps" in _runner_params:
+                _runner_kwargs["min_rps"] = float(_min_rps)
+            if "delay_ms" in _runner_params:
+                _runner_kwargs["delay_ms"] = float(_delay_ms)
+
+            try:
+                self._scan_runner = scanner_core.ScannerRunner(**_runner_kwargs)
                 self._scan_runner.start()
             except Exception as _start_exc:
                 self.log(f"[SCAN][ERR] Не удалось запустить скан: {_start_exc}")
@@ -5131,6 +5593,16 @@ class App(tk.Tk):
     def _scan_finished(self) -> None:
         # Скан завершён/остановлен: сбрасываем runner, иначе guard смены проекта
         # остался бы заблокированным (после Stop tasks_remaining может быть > 0).
+        runner = self._scan_runner
+        auth_failures = 0
+        # engine-dev может назвать поле по-разному — поддерживаем варианты.
+        for _auth_attr in ("auth_failure_count", "auth_failures", "unauth_count"):
+            try:
+                auth_failures = int(getattr(runner, _auth_attr, 0) or 0)
+            except Exception:
+                auth_failures = 0
+            if auth_failures:
+                break
         self._scan_runner = None
         self._scan_thread = None
         self._btn_run_scan.configure(state=tk.NORMAL)
@@ -5142,6 +5614,23 @@ class App(tk.Tk):
             self._refresh_results(reset=True)
         except Exception:
             pass
+        if auth_failures > 0:
+            self.log(
+                f"[SCAN][AUTH] {auth_failures} response(s) with 401/403 — "
+                "possible expired session / missing authorization"
+            )
+            try:
+                mb.showwarning(
+                    i18n.tr("Auth"),
+                    i18n.tr(
+                        "{count} responses with 401/403 — the session may have "
+                        "expired or authorization is needed; check Cookie/OTP/"
+                        "auto-login.",
+                        count=auth_failures,
+                    ),
+                )
+            except Exception:
+                pass
 
     # ──────────────────────────── Results ────────────────────────────
 
@@ -5405,6 +5894,14 @@ def _patch_app_with_auth_and_revshell(app: "App") -> None:
     _relogin_spin = ttk.Entry(hdr, textvariable=_max_relogin_var, width=4)
     _relogin_spin.pack(side=tk.LEFT, padx=2)
     app._max_relogin_entry = _relogin_spin
+
+    # OTP/2FA: provider для SessionManager + тестовая заглушка 000000.
+    ttk.Label(hdr, text="  OTP / 2FA code:").pack(side=tk.LEFT, padx=(10, 2))
+    _otp_entry = ttk.Entry(hdr, textvariable=app._otp_code_var, width=10)
+    _otp_entry.pack(side=tk.LEFT, padx=2)
+    ttk.Label(hdr, text="(test stub 000000)",
+              foreground="#a6adc8").pack(side=tk.LEFT, padx=2)
+    app._otp_entry = _otp_entry
 
     # ── Left pane: captured login requests ───────────────────────
     left_pane = ttk.LabelFrame(auth_tab, text="Captured Login Requests  (auto-detected from Proxy History)", padding=6)
@@ -5755,6 +6252,10 @@ def _patch_app_with_auth_and_revshell(app: "App") -> None:
         )
         mgr = SessionManager(auth_config=cfg, log_callback=_auth_log)
         app._session_manager = mgr
+        try:
+            app._bind_otp_provider(mgr)
+        except Exception:
+            pass
         _tpl_lbl.configure(text=f"{rec['method']} {rec['url'][:60]}")
         _auth_log(f"[AUTH] Login template set: {rec['method']} {rec['url']}")
 
@@ -5864,6 +6365,10 @@ def _patch_app_with_auth_and_revshell(app: "App") -> None:
             if cfg is not None and cfg.enabled and cfg.login_url:
                 mgr = SessionManager(auth_config=cfg, log_callback=_auth_log)
                 app._session_manager = mgr
+                try:
+                    app._bind_otp_provider(mgr)
+                except Exception:
+                    pass
                 _tpl_lbl.configure(text=f"{cfg.method} {cfg.login_url[:60]}")
                 _auth_log(f"[AUTH] Restored auto-saved credentials: {cfg.login_url}")
                 import threading as _thr

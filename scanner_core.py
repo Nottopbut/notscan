@@ -10,6 +10,7 @@ import json
 import difflib
 import hashlib
 import logging
+import random
 import re
 import threading
 import time
@@ -216,58 +217,98 @@ def _severity_guess(check_type: str) -> str:
 # ──────────────────────────── ROE: Rate limiting ────────────────────────────
 
 class RateLimiter:
-    """
-    Simple global token-bucket limiter for requests/second across all workers.
-    max_rps <= 0 or None disables limiting.
+    """Глобальный пейсер запросов (интервал между запросами, все воркеры).
+
+    Семантика (FIX_CONTRACT task-25):
+      • max_rps > 0 и min_rps > 0 (min <= max):
+            интервал = uniform(1/max, 1/min) на каждый acquire —
+            фактический RPS в диапазоне [min, max];
+      • только max_rps > 0:      интервал = 1/max (предсказуемый пейсинг);
+      • только min_rps > 0:      интервал = 1/min;
+      • delay_ms > 0:            интервал = max(delay_ms/1000, интервал);
+      • всё выключено (0/None):  acquire мгновенный.
+
+    Интервал соблюдается ГЛОБАЛЬНО: слоты резервируются под lock через
+    next_allowed, поэтому суммарная скорость всех воркеров ограничена.
+    Первый запрос выполняется сразу, дальнейшие — не чаще выбранного интервала.
+    ``acquire`` спит через time.sleep, ``acquire_async`` — через asyncio.sleep
+    (event loop не блокируется). ``clock`` — точка расширения для тестов.
     """
 
-    def __init__(self, max_rps: float | None):
+    def __init__(
+        self,
+        max_rps: float | None = None,
+        min_rps: float | None = None,
+        delay_ms: float = 0.0,
+        *,
+        clock: Optional[Callable[[], float]] = None,
+    ):
         self.max_rps = float(max_rps or 0.0)
+        self.min_rps = float(min_rps or 0.0)
+        self.delay_ms = float(delay_ms or 0.0)
+        self._clock = clock or time.time
         self._lock = threading.Lock()
-        self._tokens = self.max_rps if self.max_rps > 0 else 0.0
-        self._last = time.time()
+        self._next_allowed: float = 0.0
+        # Диагностика (для тестов/отчётов): сколько всего слотов и сколько ждали.
+        self.total_acquires = 0
+        self.total_wait_s = 0.0
+        self.last_interval_s = 0.0
+
+    @property
+    def enabled(self) -> bool:
+        return self.max_rps > 0 or self.min_rps > 0 or self.delay_ms > 0
+
+    def _pick_interval(self) -> float:
+        """Интервал (сек) для следующего слота по настройкам min/max/delay."""
+        max_rps = self.max_rps
+        min_rps = self.min_rps
+        interval = 0.0
+        if max_rps > 0 and min_rps > 0 and min_rps <= max_rps:
+            interval = random.uniform(1.0 / max_rps, 1.0 / min_rps)
+        elif max_rps > 0:
+            interval = 1.0 / max_rps
+        elif min_rps > 0:
+            interval = 1.0 / min_rps
+        if self.delay_ms > 0:
+            interval = max(interval, self.delay_ms / 1000.0)
+        return interval
+
+    def _reserve(self) -> float:
+        """Резервирует слот; возвращает 0 (можно слать) либо сколько ещё ждать."""
+        with self._lock:
+            now = self._clock()
+            wait = self._next_allowed - now
+            if wait <= 0:
+                interval = self._pick_interval()
+                self._next_allowed = now + interval if interval > 0 else now
+                self.last_interval_s = interval
+                self.total_acquires += 1
+                return 0.0
+            self.total_wait_s += wait
+            return wait
 
     def acquire(self) -> None:
-        if self.max_rps <= 0:
-            return
-        while True:
-            with self._lock:
-                now = time.time()
-                elapsed = max(0.0, now - self._last)
-                self._last = now
-                self._tokens = min(self.max_rps, self._tokens + elapsed * self.max_rps)
-                if self._tokens >= 1.0:
-                    self._tokens -= 1.0
-                    return
-                # Need to wait for more tokens
-                missing = 1.0 - self._tokens
-                wait_s = missing / self.max_rps
-            time.sleep(min(0.25, max(0.01, wait_s)))
+        """Синхронный acquire: time.sleep до разрешённого слота."""
+        while self.enabled:
+            wait = self._reserve()
+            if wait <= 0:
+                return
+            time.sleep(wait)
 
     async def acquire_async(self) -> None:
-        """Async-вариант acquire(): не блокирует event loop во время ожидания.
-
-        В отличие от acquire()/time.sleep, ожидание токена уходит в
-        ``await asyncio.sleep(...)``, поэтому остальные корутины продолжают
-        обрабатывать свои задачи.
-        """
-        if self.max_rps <= 0:
-            return
-        while True:
-            with self._lock:
-                now = time.time()
-                elapsed = max(0.0, now - self._last)
-                self._last = now
-                self._tokens = min(self.max_rps, self._tokens + elapsed * self.max_rps)
-                if self._tokens >= 1.0:
-                    self._tokens -= 1.0
-                    return
-                missing = 1.0 - self._tokens
-                wait_s = missing / self.max_rps
-            await asyncio.sleep(min(0.25, max(0.01, wait_s)))
+        """Async acquire: asyncio.sleep, event loop не блокируется."""
+        while self.enabled:
+            wait = self._reserve()
+            if wait <= 0:
+                return
+            await asyncio.sleep(wait)
 
 
 # ──────────────────────────── Scope guard ────────────────────────────
+
+#: Сколько первых out-of-scope URL логировать подробно (дальше — только счётчики).
+SCOPE_LOG_DETAIL_LIMIT = 5
+
 
 def _is_private_or_metadata_host(host: str) -> bool:
     """True if host is private IP range or cloud metadata."""
@@ -296,6 +337,79 @@ def _is_private_or_metadata_host(host: str) -> bool:
     return False
 
 
+#: Причина отказа scope-guard (для агрегированной статистики).
+SCOPE_REASON_ALLOWED = "allowed"
+SCOPE_REASON_ALLOWLIST = "allowlist"
+SCOPE_REASON_PRIVATE = "private"
+SCOPE_REASON_OTHER = "other"
+
+
+def _allowlist_matches(url: str, allowlist: Optional[List[str]]) -> bool:
+    """True, если URL матчится хотя бы одним элементом allowlist.
+
+    Матчинг (как раньше + host:port): URL-префикс (http...), hostname
+    (exact / суффикс / подстрока), а также netloc ``host:port``.
+    """
+    if not allowlist:
+        return False
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").strip().lower()
+        netloc = (parsed.netloc or "").strip().lower()
+    except Exception:
+        return False
+    url_lower = url.lower()
+    for raw_entry in allowlist:
+        entry = (raw_entry or "").strip().lower()
+        if not entry:
+            continue
+        if entry.startswith("http") and url_lower.startswith(entry):
+            return True
+        entry_no_port = entry.split("://", 1)[-1].split("/", 1)[0]
+        if entry_no_port == netloc:  # host:port
+            return True
+        if host and (
+            host == entry_no_port
+            or host.endswith("." + entry_no_port)
+            or entry_no_port in host
+        ):
+            return True
+    return False
+
+
+def classify_url_scope(
+    url: str,
+    allowlist: Optional[List[str]] = None,
+    block_private: bool = True,
+) -> tuple[bool, str]:
+    """(allowed, reason) для scope-guard.
+
+    Allowlist — явная авторизация: разрешает и private/localhost хосты.
+    Без allowlist private/metadata блокируются при block_private=True.
+    reason ∈ {allowed, allowlist, private, other}.
+    """
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").strip()
+    except Exception:
+        return False, SCOPE_REASON_OTHER
+    if not host:
+        return False, SCOPE_REASON_OTHER
+
+    if allowlist:
+        if _allowlist_matches(url, allowlist):
+            return True, SCOPE_REASON_ALLOWED
+        # Для статистики различаем «private вне allowlist» и «чужой хост»:
+        # private-причина приоритетнее, если контретный хост private/metadata.
+        if block_private and _is_private_or_metadata_host(host):
+            return False, SCOPE_REASON_PRIVATE
+        return False, SCOPE_REASON_ALLOWLIST
+
+    if block_private and _is_private_or_metadata_host(host):
+        return False, SCOPE_REASON_PRIVATE
+    return True, SCOPE_REASON_ALLOWED
+
+
 def is_url_in_scope(
     url: str,
     allowlist: Optional[List[str]] = None,
@@ -303,33 +417,14 @@ def is_url_in_scope(
 ) -> bool:
     """
     True if URL is allowed for scanning.
-    - If block_private=True, rejects localhost, 127.x, 10.x, 172.16-31.x, 192.168.x, 169.254.169.254.
-    - If allowlist is non-empty, host must match at least one entry (hostname or URL prefix).
+    - allowlist (если задан) — явная авторизация: разрешает даже private/local
+      (localhost-цели разрешены, если хост в allowlist);
+    - block_private=True без allowlist: отклоняет localhost, 127.x, 10.x,
+      172.16-31.x, 192.168.x, 169.254.169.254.
+    Матчинг allowlist: hostname / host:port / URL-префикс / суффикс домена.
     """
-    try:
-        parsed = urlparse(url)
-        host = (parsed.hostname or "").strip()
-    except Exception:
-        return False
-
-    # Allowlist имеет приоритет: явно разрешённый хост пропускается,
-    # даже если это приватный/локальный IP (иначе block_private ломал allowlist).
-    if allowlist:
-        url_lower = url.lower()
-        host_lower = host.lower()
-        for a in allowlist:
-            a = (a or "").strip().lower()
-            if not a:
-                continue
-            if a.startswith("http") and url_lower.startswith(a):
-                return True
-            if host_lower == a or host_lower.endswith("." + a) or a in host_lower:
-                return True
-        return False
-
-    if block_private and _is_private_or_metadata_host(host):
-        return False
-    return True
+    allowed, _reason = classify_url_scope(url, allowlist, block_private)
+    return allowed
 
 _PAYLOADS_SUBDIR = Path(__file__).parent / "payloads"
 PAYLOADS_DIR = _PAYLOADS_SUBDIR if _PAYLOADS_SUBDIR.exists() else Path(__file__).parent
@@ -1866,6 +1961,12 @@ def _relogin_and_get_headers(
     relogin_count = getattr(session_manager, "_relogin_count", 0)
 
     if auth_enabled and relogin_count < max_attempts:
+        # Сразу увеличиваем счётчик попыток, иначе каждый 401 в воркере снова
+        # дёргал бы login() бесконечно. Успешный login() сам сбрасывает его в 0.
+        try:
+            session_manager._relogin_count = relogin_count + 1  # noqa: SLF001
+        except Exception:
+            pass
         log_cb(
             f"[SESSION] Worker-{worker_id}: {status_code} on {url[:60]} "
             f"— auto re-login (attempt {relogin_count + 1}/{max_attempts})"
@@ -2083,6 +2184,8 @@ class ScannerRunner:
         scope_block_private: bool = True,
         max_rps: float | None = None,
         stop_on_session_drift: bool = False,
+        min_rps: float | None = None,
+        delay_ms: float = 0.0,
     ):
         self.tasks = tasks
         self.workers = workers
@@ -2092,8 +2195,26 @@ class ScannerRunner:
         self.scope_allowlist = scope_allowlist or []
         self.scope_block_private = scope_block_private
         self.max_rps = max_rps
-        self._rate_limiter = RateLimiter(max_rps)
+        self.min_rps = min_rps
+        self.delay_ms = float(delay_ms or 0.0)
+        self._rate_limiter = RateLimiter(
+            max_rps=max_rps, min_rps=min_rps, delay_ms=self.delay_ms
+        )
         self.stop_on_session_drift = stop_on_session_drift
+
+        # ── Scope-guard статистика (вместо спама per-request в GUI-лог) ──
+        self._scope_lock = threading.Lock()
+        self._scope_skipped = 0
+        self._scope_skipped_private = 0
+        self._scope_skipped_allowlist = 0
+        self._scope_skipped_other = 0
+        self._scope_details_logged = 0
+        self._scope_examples: list[str] = []
+
+        # ── Auth preflight counters (GUI предупреждает после скана) ──
+        self._auth_lock = threading.Lock()
+        self.auth_failure_count = 0
+        self.last_auth_status: Optional[int] = None
         self._tasks_total = len(tasks)
         self._completed = 0
         self._in_flight = 0
@@ -2176,6 +2297,101 @@ class ScannerRunner:
         return remaining if remaining > 0 else 0
 
     # ── внутреннее ──────────────────────────────────────────────────
+
+    # ── Scope-guard: агрегированные счётчики вместо per-request лога ──
+
+    def _record_scope_skip(self, reason: str, url: str) -> None:
+        host = ""
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except Exception:
+            host = ""
+        with self._scope_lock:
+            self._scope_skipped += 1
+            if reason == SCOPE_REASON_PRIVATE:
+                self._scope_skipped_private += 1
+            elif reason == SCOPE_REASON_ALLOWLIST:
+                self._scope_skipped_allowlist += 1
+            else:
+                self._scope_skipped_other += 1
+            if self._scope_details_logged < SCOPE_LOG_DETAIL_LIMIT:
+                self._scope_details_logged += 1
+                detail = True
+            else:
+                detail = False
+            if host and host not in self._scope_examples and len(self._scope_examples) < 10:
+                self._scope_examples.append(host)
+        if detail:
+            self.log_cb(
+                f"[SCOPE] Skipping out-of-scope URL ({reason}): {url[:100]}"
+            )
+
+    def scope_stats(self) -> dict:
+        """Снимок статистики scope-guard (для GUI/тестов/отчёта)."""
+        with self._scope_lock:
+            return {
+                "skipped": self._scope_skipped,
+                "private": self._scope_skipped_private,
+                "allowlist": self._scope_skipped_allowlist,
+                "other": self._scope_skipped_other,
+                "details_logged": self._scope_details_logged,
+                "examples": list(self._scope_examples),
+            }
+
+    def _log_scope_summary(self) -> None:
+        with self._scope_lock:
+            skipped = self._scope_skipped
+            private = self._scope_skipped_private
+            allowlist = self._scope_skipped_allowlist
+            other = self._scope_skipped_other
+            examples = list(self._scope_examples)
+        if skipped:
+            suffix = f"; examples: {', '.join(examples[:5])}" if examples else ""
+            self.log_cb(
+                f"[SCOPE] Skipped {skipped} requests outside scope "
+                f"(private={private}, allowlist={allowlist}, other={other}){suffix}"
+            )
+
+    # ── Auth-ответы: агрегированные счётчики (401/403/login-redirect) ──
+
+    def _record_auth_observation(
+        self,
+        status_code: Optional[int],
+        response_headers: Optional[dict] = None,
+    ) -> None:
+        """Считает 401/403 и редиректы на login; поведение скана не меняет."""
+        if status_code is None:
+            return
+        auth_failure = status_code in (401, 403)
+        if not auth_failure and 300 <= int(status_code) < 400 and response_headers:
+            location = (
+                response_headers.get("Location")
+                or response_headers.get("location")
+                or ""
+            )
+            auth_failure = "login" in str(location).lower()
+        if not auth_failure:
+            return
+        with self._auth_lock:
+            self.auth_failure_count += 1
+            self.last_auth_status = int(status_code)
+
+    def auth_stats(self) -> dict:
+        """Снимок auth-counters (GUI предупреждает о 401/403 после скана)."""
+        with self._auth_lock:
+            return {
+                "auth_failure_count": self.auth_failure_count,
+                "last_auth_status": self.last_auth_status,
+            }
+
+    def _log_auth_summary(self) -> None:
+        stats = self.auth_stats()
+        if stats["auth_failure_count"]:
+            self.log_cb(
+                f"[AUTH] {stats['auth_failure_count']} responses with 401/403/"
+                f"login-redirect during scan (last status="
+                f"{stats['last_auth_status']}) — проверь Cookie/OTP/авто-логин"
+            )
 
     def _login_session(self) -> Optional[dict]:
         """Sync-логин сессии в start() (как в старом движке; поток не event loop)."""
@@ -2264,6 +2480,11 @@ class ScannerRunner:
             for client in clients:
                 with contextlib.suppress(Exception):
                     await client.aclose()
+            # Один агрегированный итог по scope/auth вместо per-request логов.
+            with contextlib.suppress(Exception):
+                self._log_scope_summary()
+            with contextlib.suppress(Exception):
+                self._log_auth_summary()
 
     async def _async_consumer(
         self,
@@ -2307,15 +2528,16 @@ class ScannerRunner:
         client: httpx.AsyncClient,
     ) -> Optional[dict]:
         """Обработка одной задачи: запрос → matchers → checks → persist."""
-        # Scope guard: skip out-of-scope or blocked private/metadata targets
-        if not is_url_in_scope(
+        # Scope guard: allowlist — явная авторизация (разрешает private/local);
+        # блокируем private/metadata только ВНЕ allowlist. Подробно логируем
+        # первые SCOPE_LOG_DETAIL_LIMIT записей, дальше — агрегированные счётчики.
+        allowed, scope_reason = classify_url_scope(
             task.url,
             self.scope_allowlist if self.scope_allowlist else None,
             self.scope_block_private,
-        ):
-            self.log_cb(
-                f"[SCOPE] Skipping out-of-scope or blocked private URL: {task.url[:80]}"
-            )
+        )
+        if not allowed:
+            self._record_scope_skip(scope_reason, task.url)
             return session_headers
 
         headers = _merge_session_headers(task.headers, session_headers)
@@ -2350,6 +2572,7 @@ class ScannerRunner:
             elapsed_ms_obs = (time.perf_counter() - start_ts) * 1000.0
             resp_text = resp.text[:RESP_PREVIEW_SIZE]
             raw_response_preview = _build_raw_response_preview(resp, resp_text)
+            self._record_auth_observation(status_code, dict(resp.headers))
 
             # ── Session drift monitor + auto-relogin on 401/403 ──
             if _is_auth_error_response(status_code, dict(resp.headers), resp_text):
@@ -2383,6 +2606,9 @@ class ScannerRunner:
                             resp_text = resp.text[:RESP_PREVIEW_SIZE]
                             raw_response_preview = _build_raw_response_preview(
                                 resp, resp_text
+                            )
+                            self._record_auth_observation(
+                                status_code, dict(resp.headers)
                             )
                             self.log_cb(
                                 f"[SESSION] Retry after re-login: {status_code} "
@@ -2435,6 +2661,9 @@ class ScannerRunner:
                     )
                     false_status = false_resp.status_code
                     false_text = false_resp.text[:BLIND_TEXT_LIMIT]
+                    self._record_auth_observation(
+                        false_status, dict(false_resp.headers)
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception as pair_exc:

@@ -47,8 +47,18 @@ python notscan.py
 - **Multi-boundary мутации:** в Scan Config → Advanced → Mutation points можно включать
   cookie, path-сегменты и multipart/form-data (по умолчанию включены); файловые части
   multipart не мутируются.
-- **Язык интерфейса:** Settings → Language (English/Русский). Применяется после
-  перезапуска приложения; отчёты MD/HTML/DOCX локализуются вместе с UI.
+- **Язык интерфейса:** русский — по умолчанию; Settings → Language (English/Русский),
+  применяется после перезапуска; env `NOTSCAN_UI_LANGUAGE=en|ru`; отчёты MD/HTML/DOCX
+  локализуются вместе с UI.
+- **Rate limiting:** Scan Config → Advanced → Workers/Min RPS/Max RPS/Delay (ms).
+  Min+Max задают случайный пейсинг 1/max…1/min, Delay — фиксированную паузу.
+- **Scope и локальные цели:** хосты из Scan list автоматически разрешаются в scope
+  (private/localhost не блокируются); для приватной цели — одно подтверждение.
+  Пропущенные запросы логируются первыми 5 примерами + итоговой строкой `[SCOPE]`.
+- **Авторизация/2FA:** после импорта Postman Cookie/Authorization подтягиваются
+  автоматически (и в probe); login-запрос → предложение авто-логина (Auth tab).
+  Перед сканом — preflight-проверка 401/403/login; OTP/2FA вводится в Auth tab
+  (тестовая заглушка `000000`, env `NOTSCAN_OTP_STUB`), авто-relogin повторяет логин.
 - **DOCX-отчёт:** A4 landscape, фиксированные ширины колонок, повтор шапки,
   переносы длинных URL — файл читается в Word/LibreOffice без «узких» колонок.
 - **Фильтр фонового шума:** телеметрия Google/Chromium, обновления компонентов,

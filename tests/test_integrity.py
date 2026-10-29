@@ -278,9 +278,21 @@ class TestReportFullExport(_DbTestCase):
 
     def setUp(self):
         super().setUp()
+        # Отчёты локализуются вместе с UI; тест проверяет EN-вывод.
+        import i18n
+        self._saved_lang = i18n.get_language()
+        i18n.set_language("en")
         _bulk_insert(self.N, evidence_every=5)
         # каждые 5 строк — evidence; всего находок (уникальных URL с evidence)
         self.expected_findings = self.N // 5
+
+    def tearDown(self):
+        try:
+            import i18n
+            i18n.set_language(self._saved_lang)
+        except Exception:
+            pass
+        super().tearDown()
 
     def test_build_report_data_default_is_full(self):
         data = report_export._build_report_data()

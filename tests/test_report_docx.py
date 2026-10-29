@@ -8,8 +8,22 @@
 import os
 import tempfile
 
+import pytest
+
 import db
 import report_export
+
+
+@pytest.fixture(autouse=True)
+def _english_reports():
+    """Экспорт отчётов локализуется по языку UI; тест проверяет EN-вывод."""
+    import i18n
+    saved = i18n.get_language()
+    i18n.set_language("en")
+    try:
+        yield
+    finally:
+        i18n.set_language(saved)
 
 
 def _seed(tmp_db: str) -> int:

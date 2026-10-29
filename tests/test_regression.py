@@ -163,6 +163,9 @@ class TestPerProjectDB(unittest.TestCase):
 
 class TestReportExport(unittest.TestCase):
     def setUp(self):
+        import i18n
+        self._saved_lang = i18n.get_language()
+        i18n.set_language("en")
         self._db = tempfile.mktemp(suffix=".db")
         db.set_db_path(self._db)
         db.insert_scan_result(template_id="t1", worker_id=0, method="GET", url="http://x/a?id=1",
@@ -172,6 +175,11 @@ class TestReportExport(unittest.TestCase):
                               status_code=200, error=None, check_type="cmdi", payload=";id", evidence=None)
 
     def tearDown(self):
+        try:
+            import i18n
+            i18n.set_language(self._saved_lang)
+        except Exception:
+            pass
         if os.path.exists(self._db):
             os.remove(self._db)
 

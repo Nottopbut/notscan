@@ -56,6 +56,7 @@ def _run_gui_script(
     code: str,
     *,
     disable_proxy_autostart: bool = True,
+    language: str | None = "en",
     timeout: int = 180,
 ) -> dict:
     env = dict(os.environ)
@@ -63,6 +64,11 @@ def _run_gui_script(
         env["NOTSCAN_DISABLE_PROXY_AUTOSTART"] = "1"
     else:
         env.pop("NOTSCAN_DISABLE_PROXY_AUTOSTART", None)
+    # D: RU default — старые GUI-тесты ожидают EN, поэтому явно задаём язык.
+    if language is None:
+        env.pop("NOTSCAN_UI_LANGUAGE", None)
+    else:
+        env["NOTSCAN_UI_LANGUAGE"] = language
     proc = subprocess.run(
         [*_python_cmd(), "-c", textwrap.dedent(code)],
         cwd=str(project),
@@ -717,6 +723,9 @@ def _fake_app(tmp_path, settings=None):
     app._scope_allowlist_entry = _FakeEntry("")
     app._scope_block_private_var = _FakeVar(True)
     app._roe_max_rps_entry = _FakeEntry("0")
+    app._roe_min_rps_var = _FakeVar("0")
+    app._roe_max_rps_var = _FakeVar("0")
+    app._roe_delay_ms_var = _FakeVar("0")
     app._roe_block_checks_entry = _FakeEntry("file_upload,ssrf,xxe,deserialization")
     app._roe_stop_on_session_drift = _FakeVar(True)
     app._burp_browser_path = _FakeEntry("")
@@ -740,6 +749,9 @@ def test_save_settings_persists_proxy_and_scan_settings(tmp_path):
     app._scope_allowlist_entry.insert(0, "10.0.0.1,example.test")
     app._scope_block_private_var.set(False)
     app._roe_max_rps_entry.insert(0, "5")
+    app._roe_min_rps_var.set("2")
+    app._roe_max_rps_var.set("5")
+    app._roe_delay_ms_var.set("100")
     app._roe_block_checks_entry.insert(0, "file_upload,ssrf")
     app._roe_stop_on_session_drift.set(False)
     app._burp_browser_path.insert(0, "/opt/chrome")
@@ -754,6 +766,9 @@ def test_save_settings_persists_proxy_and_scan_settings(tmp_path):
     assert saved["scope_allowlist"] == "10.0.0.1,example.test"
     assert saved["scope_block_private"] is False
     assert saved["roe_max_rps"] == "5"
+    assert saved["min_rps"] == "2"
+    assert saved["max_rps"] == "5"
+    assert saved["delay_ms"] == "100"
     assert saved["roe_block_checks"] == "file_upload,ssrf"
     assert saved["roe_stop_on_session_drift"] is False
     assert saved["burp_browser_path"] == "/opt/chrome"
@@ -1131,6 +1146,9 @@ hid = db.insert_history(
     resp_headers={}, resp_body_preview=None,
 )
 app._scan_list = {hid: db.fetch_history_by_id(hid)}
+# task-26: без реального preflight и без диалога private-цели (localhost).
+app._private_scope_approved = True
+app._preflight_auth = lambda _ids: True
 app._inject_headers_var.set("X-Forwarded-Host, X-Custom")
 app._only_params_var.set("id, q, ID")
 app._probe_extra_headers_var.set("Cookie: PHPSESSID=abc123\nX-Test-Header: 1")
@@ -1377,9 +1395,12 @@ res["saved_lang"] = json.loads(
 app._proxy_shutdown_done = True
 app.destroy()
 
-# EN — язык по умолчанию (новый проект без settings)
+# EN через settings (default без настроек теперь RU — см. отдельный тест)
 en_proj = root / "i18n_en_project"
 en_proj.mkdir(parents=True, exist_ok=True)
+(en_proj / "settings.json").write_text(
+    json.dumps({"ui_language": "en"}), encoding="utf-8"
+)
 project_manager.create_project = lambda *a, **k: en_proj
 app2 = notscan.App()
 app2.update()
@@ -1493,7 +1514,7 @@ print("GUI_OK")
 def test_gui_ru_language_and_default_en(tmp_path):
     """ui_language=ru применяется до UI; по умолчанию — English; выбор сохраняется."""
     project = _copy_project(tmp_path)
-    data = _run_gui_script(project, _LANGUAGE_SCRIPT, timeout=240)
+    data = _run_gui_script(project, _LANGUAGE_SCRIPT, language=None, timeout=240)
 
     # RU-режим: ключевые надписи и вкладки переведены.
     assert data["lang"] == "ru", data
@@ -1601,6 +1622,9 @@ hid = db.insert_history(
     resp_headers={}, resp_body_preview=None,
 )
 app._scan_list = {hid: db.fetch_history_by_id(hid)}
+# task-26: не показываем диалог private-цели и не делаем реальный preflight.
+app._private_scope_approved = True
+app._preflight_auth = lambda _ids: True
 cfg = notscan.ScanConfigWindow(app)
 app.update()
 
@@ -1835,3 +1859,484 @@ def test_gui_postman_environment_import_flow(tmp_path):
     assert fallback["env"] == {"baseUrl": "http://x.test"}
 
     assert data["has_env_button"] is True, "нет кнопки ⬆ Import environment"
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Task-26: RPS/delay, scope private UX, Postman auth/OTP/preflight, RU default
+# ══════════════════════════════════════════════════════════════════
+
+_RATE_LIMIT_SCRIPT = r"""
+import json, sys, threading
+sys.path.insert(0, ".")
+import notscan
+import scanner_core
+import db
+
+captured = {}
+
+
+class FakeRunner:
+    def __init__(self, tasks, workers=10, log_callback=print, proxy_url=None,
+                 session_manager=None, scope_allowlist=None,
+                 scope_block_private=True, max_rps=None,
+                 stop_on_session_drift=False, min_rps=None, delay_ms=None):
+        captured.update({
+            "min_rps": min_rps,
+            "max_rps": max_rps,
+            "delay_ms": delay_ms,
+            "scope_allowlist": scope_allowlist,
+            "workers": workers,
+        })
+        self._stop = threading.Event()
+
+    @property
+    def tasks_remaining(self):
+        return 0
+
+    def start(self):
+        pass
+
+    def stop(self, wait=True):
+        self._stop.set()
+
+
+scanner_core.ScannerRunner = FakeRunner
+app = notscan.App()
+app.update()
+app._private_scope_approved = True
+app._preflight_auth = lambda _ids: True
+for cid in list(app._check_vars):
+    app._check_vars[cid].set(cid == "sqli")
+hid = db.insert_history(
+    method="GET", url="http://127.0.0.1:9/never?a=1",
+    req_headers={}, req_body=None, resp_status=200,
+    resp_headers={}, resp_body_preview=None,
+)
+app._scan_list = {hid: db.fetch_history_by_id(hid)}
+cfg = notscan.ScanConfigWindow(app)
+app.update()
+res = {
+    "has_vars": all(hasattr(app, n) for n in (
+        "_roe_min_rps_var", "_roe_max_rps_var", "_roe_delay_ms_var")),
+    "defaults": [app._roe_min_rps_var.get(), app._roe_max_rps_var.get(),
+                 app._roe_delay_ms_var.get()],
+    "has_entries": [
+        hasattr(cfg, "_roe_min_rps_entry"),
+        hasattr(cfg, "_roe_max_rps_entry_new"),
+        hasattr(cfg, "_roe_delay_ms_entry"),
+    ],
+    "values_default": list(app._rate_limit_values()),
+}
+app._roe_min_rps_var.set("2")
+app._roe_max_rps_var.set("5")
+app._roe_delay_ms_var.set("100")
+res["values_set"] = list(app._rate_limit_values())
+app._roe_min_rps_var.set("abc")
+res["values_garbage"] = list(app._rate_limit_values())
+app._roe_min_rps_var.set("2")
+app.after(0, app._run_scan)
+app.after(1500, app.quit)
+app.mainloop()
+res["captured"] = dict(captured)
+
+# Fallback: новое Max RPS пусто → используется старое ROE-поле Settings.
+captured.clear()
+app._roe_max_rps_var.set("0")
+app._roe_min_rps_var.set("0")
+app._roe_delay_ms_var.set("0")
+app._roe_max_rps_entry.delete(0, "end")
+app._roe_max_rps_entry.insert(0, "7")
+app._scan_runner = None
+app.after(0, app._run_scan)
+app.after(1500, app.quit)
+app.mainloop()
+res["captured_fallback_old"] = dict(captured)
+print("RESULT_JSON " + json.dumps(res, ensure_ascii=False))
+app._proxy_shutdown_done = True
+app.destroy()
+print("GUI_OK")
+"""
+
+_SCOPE_SCRIPT = r"""
+import json, sys, threading
+sys.path.insert(0, ".")
+import notscan
+import scanner_core
+import db
+
+captured = []
+asks = []
+
+
+class FakeRunner:
+    def __init__(self, tasks, workers=10, log_callback=print, proxy_url=None,
+                 session_manager=None, scope_allowlist=None,
+                 scope_block_private=True, max_rps=None,
+                 stop_on_session_drift=False, min_rps=None, delay_ms=None):
+        captured.append({
+            "scope_allowlist": list(scope_allowlist or []),
+            "scope_block_private": scope_block_private,
+        })
+        self._stop = threading.Event()
+
+    @property
+    def tasks_remaining(self):
+        return 0
+
+    def start(self):
+        pass
+
+    def stop(self, wait=True):
+        self._stop.set()
+
+
+scanner_core.ScannerRunner = FakeRunner
+app = notscan.App()
+app.update()
+app._preflight_auth = lambda _ids: True
+notscan.mb.askyesno = lambda title=None, message=None, *a, **k: (
+    asks.append(str(title)), True)[1]
+for cid in list(app._check_vars):
+    app._check_vars[cid].set(cid == "sqli")
+ids = []
+for url in (
+    "http://127.0.0.1:8080/a?x=1",
+    "http://10.0.0.5/b?y=2",
+    "http://example.test/c?z=3",
+):
+    ids.append(db.insert_history(
+        method="GET", url=url, req_headers={}, req_body=None,
+        resp_status=200, resp_headers={}, resp_body_preview=None,
+    ))
+app._scan_list = {hid: db.fetch_history_by_id(hid) for hid in ids}
+app._scope_allowlist_entry.delete(0, "end")
+app._scope_allowlist_entry.insert(0, "explicit.test")
+app.after(0, app._run_scan)
+app.after(1500, app.quit)
+app.mainloop()
+res = {
+    "allowlist": captured[-1]["scope_allowlist"] if captured else None,
+    "asks_first": len(asks),
+    "runs_first": len(captured),
+}
+# Второй прогон: private уже подтверждён в сессии — не спрашиваем.
+app._scan_runner = None
+app.after(0, app._run_scan)
+app.after(1500, app.quit)
+app.mainloop()
+res["asks_after_second"] = len(asks)
+res["runs_total"] = len(captured)
+# Отказ пользователя: новый confirm → abort, runner не создаётся.
+app._private_scope_approved = False
+notscan.mb.askyesno = lambda title=None, message=None, *a, **k: False
+before = len(captured)
+app._scan_runner = None
+app.after(0, app._run_scan)
+app.after(800, app.quit)
+app.mainloop()
+res["cancelled_runs"] = len(captured) - before
+print("RESULT_JSON " + json.dumps(res, ensure_ascii=False))
+app._proxy_shutdown_done = True
+app.destroy()
+print("GUI_OK")
+"""
+
+_AUTH_POSTMAN_SCRIPT = r"""
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, ".")
+from tkinter import filedialog
+import collection_io
+import session_manager
+import notscan
+import db
+
+app = notscan.App()
+app.update()
+project = Path(app._project_dir)
+collection = project / "auth_collection.json"
+collection.write_text(json.dumps({"info": {"name": "auth"}, "item": []}),
+                      encoding="utf-8")
+
+asks = []
+infos = []
+notscan.mb.askyesno = lambda title=None, message=None, *a, **k: (
+    asks.append((title, message)), True)[1]
+notscan.mb.showinfo = lambda *a, **k: infos.append(a)
+notscan.mb.showwarning = lambda *a, **k: infos.append(a)
+filedialog.askopenfilename = lambda *a, **k: str(collection)
+collection_io.postman_missing_variables = lambda path, environment=None: []
+collection_io.postman_auth_headers = lambda path, variables=None: {"Cookie": "sid=1"}
+candidate = {
+    "method": "POST",
+    "url": "http://x.test/login",
+    "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+    "body": {"username": "admin", "password": "pw"},
+    "content_type": "form",
+    "otp_field": None,
+}
+collection_io.postman_login_request = lambda path, variables=None: dict(candidate)
+
+
+def fake_import(path, variables=None):
+    return [
+        {"method": "GET", "url": "http://x.test/a", "headers": {}, "body": None},
+        {"method": "GET", "url": "http://x.test/b",
+         "headers": {"Authorization": "Bearer own"}, "body": None},
+    ]
+
+
+collection_io.import_collection = fake_import
+
+providers = {}
+_orig_set = getattr(session_manager.SessionManager, "set_otp_provider", None)
+
+
+def _fake_set_otp_provider(self, provider):
+    providers["provider"] = provider
+
+
+session_manager.SessionManager.set_otp_provider = _fake_set_otp_provider
+app._otp_code_var.set("123456")
+app._import_collection()
+app.update()
+rows = db.fetch_history(limit=10)
+headers = {}
+for rec in rows:
+    try:
+        headers[rec["url"]] = json.loads(rec["req_headers"] or "{}")
+    except Exception:
+        headers[rec["url"]] = {}
+res = {
+    "history": len(rows),
+    "a_headers": headers.get("http://x.test/a"),
+    "b_headers": headers.get("http://x.test/b"),
+    "postman_auth": dict(app._postman_auth_headers),
+    "probe_headers": app._probe_extra_headers_var.get(),
+    "session_manager": app._session_manager is not None,
+    "auth_enabled": bool(getattr(app._session_manager, "auth_enabled", False)),
+    "login_url": getattr(getattr(app._session_manager, "auth", None), "login_url", None),
+    "asks": len(asks),
+    "provider_value": None,
+    "provider_stub": None,
+}
+provider = providers.get("provider")
+if provider:
+    res["provider_value"] = provider()
+app._otp_code_var.set("")
+os.environ["NOTSCAN_OTP_STUB"] = "000000"
+if provider:
+    res["provider_stub"] = provider()
+if _orig_set is not None:
+    session_manager.SessionManager.set_otp_provider = _orig_set
+print("RESULT_JSON " + json.dumps(res, ensure_ascii=False))
+app._proxy_shutdown_done = True
+app.destroy()
+print("GUI_OK")
+"""
+
+_PREFLIGHT_SCRIPT = r"""
+import json, sys, threading, time
+sys.path.insert(0, ".")
+import notscan
+import db
+
+RESP = {"status": 401, "headers": {}, "text": "login required"}
+ASK = {"count": 0}
+
+
+class FakeResponse:
+    def __init__(self):
+        self.status_code = RESP["status"]
+        self.headers = dict(RESP["headers"])
+        self.text = RESP["text"]
+
+
+class FakeClient:
+    def __init__(self, *a, **k):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def get(self, url, headers=None):
+        return FakeResponse()
+
+
+notscan.httpx.Client = FakeClient
+app = notscan.App()
+app.update()
+notscan.mb.askyesno = lambda title=None, message=None, *a, **k: (
+    ASK.__setitem__("count", ASK["count"] + 1), False)[1]
+hid = db.insert_history(
+    method="GET", url="http://x.test/private", req_headers={}, req_body=None,
+    resp_status=200, resp_headers={}, resp_body_preview=None,
+)
+app._scan_list = {hid: db.fetch_history_by_id(hid)}
+
+
+def _run_in_thread(fn):
+    result = {}
+
+    def _target():
+        try:
+            result["value"] = fn()
+        except Exception as exc:
+            result["error"] = str(exc)
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    deadline = time.time() + 60
+    while thread.is_alive() and time.time() < deadline:
+        app.update()
+        time.sleep(0.01)
+    thread.join(5)
+    return result
+
+
+res = {}
+RESP.update(status=401, headers={}, text="login required")
+res["unauth"] = _run_in_thread(lambda: app._preflight_auth([hid]))
+res["asks_after_401"] = ASK["count"]
+RESP.update(status=302, headers={"Location": "/login?next=/private"}, text="")
+res["redirect_login"] = _run_in_thread(lambda: app._preflight_auth([hid]))
+res["asks_after_redirect"] = ASK["count"]
+RESP.update(status=200, headers={}, text="welcome")
+res["ok200"] = _run_in_thread(lambda: app._preflight_auth([hid]))
+res["asks_after_200"] = ASK["count"]
+# Пустой scan-list — не блокируем.
+res["empty"] = app._preflight_auth([])
+print("RESULT_JSON " + json.dumps(res, ensure_ascii=False))
+app._proxy_shutdown_done = True
+app.destroy()
+print("GUI_OK")
+"""
+
+_DEFAULT_LANG_SCRIPT = r"""
+import json, os, sys
+sys.path.insert(0, ".")
+import notscan
+import i18n
+
+app = notscan.App()
+app.update()
+res = {
+    "default_lang": i18n.get_language(),
+    "ru_tabs": [app._notebook.tab(t, "text") for t in app._notebook.tabs()],
+    "ru_summary": app._chk_summary_lbl.cget("text"),
+}
+app._proxy_shutdown_done = True
+app.destroy()
+
+os.environ["NOTSCAN_UI_LANGUAGE"] = "en"
+app2 = notscan.App()
+app2.update()
+res["env_lang"] = i18n.get_language()
+res["en_tabs"] = [app2._notebook.tab(t, "text") for t in app2._notebook.tabs()]
+app2._proxy_shutdown_done = True
+app2.destroy()
+print("RESULT_JSON " + json.dumps(res, ensure_ascii=False))
+print("GUI_OK")
+"""
+
+
+@pytest.mark.integration
+def test_gui_rate_limit_min_max_delay_fields_and_runner_kwargs(tmp_path):
+    """Min/Max RPS + Delay: поля в Advanced, валидация, kwargs в ScannerRunner."""
+    project = _copy_project(tmp_path)
+    data = _run_gui_script(project, _RATE_LIMIT_SCRIPT, timeout=300)
+
+    assert data["has_vars"] is True
+    assert data["defaults"] == ["0", "0", "0"], data["defaults"]
+    assert all(data["has_entries"]), data["has_entries"]
+    assert data["values_default"] == [0.0, 0.0, 0.0]
+    assert data["values_set"] == [2.0, 5.0, 100.0]
+    assert data["values_garbage"] == [0.0, 5.0, 100.0], data["values_garbage"]
+
+    captured = data["captured"]
+    assert captured["min_rps"] == 2.0, captured
+    assert captured["max_rps"] == 5.0, captured
+    assert captured["delay_ms"] == 100.0, captured
+    assert "127.0.0.1" in (captured["scope_allowlist"] or []), captured
+
+    # Backward compat: если новое Max RPS пусто — берём старое ROE-поле.
+    fallback = data["captured_fallback_old"]
+    assert fallback["max_rps"] == 7.0, fallback
+    assert fallback["min_rps"] == 0.0
+    assert fallback["delay_ms"] == 0.0
+
+
+@pytest.mark.integration
+def test_gui_scope_allowlist_and_private_target_confirm(tmp_path):
+    """Hosts целей → allowlist; private confirm один раз; отказ отменяет скан."""
+    project = _copy_project(tmp_path)
+    data = _run_gui_script(project, _SCOPE_SCRIPT, timeout=300)
+
+    allowlist = data.get("allowlist") or []
+    assert "127.0.0.1" in allowlist, allowlist
+    assert "10.0.0.5" in allowlist, allowlist
+    assert "example.test" in allowlist, allowlist
+    assert "explicit.test" in allowlist, allowlist
+    assert data["asks_first"] == 1, "должен быть один confirm про private"
+    assert data["runs_first"] == 1
+    assert data["asks_after_second"] == 1, "повторно про private не спрашиваем"
+    assert data["runs_total"] == 2
+    assert data["cancelled_runs"] == 0, "отказ должен отменять скан (без runner)"
+
+
+@pytest.mark.integration
+def test_gui_postman_auth_otp_and_autologin(tmp_path):
+    """Auth из Postman: Cookie в записи/порт probe, авто-логин, OTP-провайдер."""
+    project = _copy_project(tmp_path)
+    data = _run_gui_script(project, _AUTH_POSTMAN_SCRIPT, timeout=300)
+
+    assert data["history"] == 2, data
+    a_headers = {k.lower(): v for k, v in (data["a_headers"] or {}).items()}
+    b_headers = {k.lower(): v for k, v in (data["b_headers"] or {}).items()}
+    assert a_headers.get("cookie") == "sid=1", a_headers
+    assert b_headers.get("cookie") == "sid=1", b_headers
+    assert b_headers.get("authorization") == "Bearer own", b_headers
+    assert data["postman_auth"] == {"Cookie": "sid=1"}
+    probe = (data["probe_headers"] or "").lower()
+    assert "cookie: sid=1" in probe, data["probe_headers"]
+    assert data["session_manager"] is True
+    assert data["auth_enabled"] is True
+    assert data["login_url"] == "http://x.test/login"
+    assert data["asks"] >= 1
+    assert data["provider_value"] == "123456", data
+    assert data["provider_stub"] == "000000", data
+
+
+@pytest.mark.integration
+def test_gui_auth_preflight_warning_only_on_unauth(tmp_path):
+    """Preflight: 401/redirect-login → warning; 200/пустой scan-list → без вопросов."""
+    project = _copy_project(tmp_path)
+    data = _run_gui_script(project, _PREFLIGHT_SCRIPT, timeout=300)
+
+    assert data["unauth"] == {"value": False}, data["unauth"]
+    assert data["asks_after_401"] == 1
+    assert data["redirect_login"] == {"value": False}, data["redirect_login"]
+    assert data["asks_after_redirect"] == 2
+    assert data["ok200"] == {"value": True}, data["ok200"]
+    assert data["asks_after_200"] == 2, "200 не должен спрашивать"
+    assert data["empty"] is True
+
+
+@pytest.mark.integration
+def test_gui_default_language_ru_and_env_override(tmp_path):
+    """D: без env/settings — RU; env NOTSCAN_UI_LANGUAGE=en перекрывает."""
+    project = _copy_project(tmp_path)
+    data = _run_gui_script(project, _DEFAULT_LANG_SCRIPT, language=None, timeout=240)
+
+    assert data["default_lang"] == "ru", data
+    ru_tabs = [t.strip() for t in data["ru_tabs"]]
+    assert "Прокси / Скан" in ru_tabs, ru_tabs
+    assert "Настройки" in ru_tabs, ru_tabs
+    assert "чеков включено" in data["ru_summary"], data["ru_summary"]
+    assert data["env_lang"] == "en", data
+    en_tabs = [t.strip() for t in data["en_tabs"]]
+    assert "Proxy / Scan" in en_tabs, en_tabs
+    assert "Settings" in en_tabs, en_tabs

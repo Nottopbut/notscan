@@ -425,6 +425,198 @@ def parse_postman(path, variables: Optional[dict] = None) -> list[dict]:
     return records
 
 
+# ──────────────────────────── Postman auth (для импорта) ────────────────────────────
+
+_COOKIE_VAR_NAMES = {"sessioncookie", "cookie", "session", "csrftoken", "jsessionid"}
+_TOKEN_VAR_NAMES = {"token", "accesstoken", "access_token", "bearertoken", "bearer_token",
+                    "jwt", "authorization", "authtoken", "api_token", "apikey", "api_key"}
+
+
+def _item_auth(item: dict, variables: dict) -> dict:
+    """Извлекает Authorization/Cookie из Postman auth-блока запроса/коллекции."""
+    auth = item.get("auth")
+    if isinstance(auth, dict):
+        atype = str(auth.get("type") or "").lower()
+        if atype == "bearer":
+            token = ""
+            for entry in auth.get("bearer") or []:
+                if entry.get("key") == "token":
+                    token = _resolve_text(str(entry.get("value") or ""), variables)
+            if token:
+                return {"Authorization": f"Bearer {token}"}
+        if atype == "basic":
+            vals = {e.get("key"): e.get("value") for e in auth.get("basic") or [] if isinstance(e, dict)}
+            user = _resolve_text(str(vals.get("username") or ""), variables)
+            pwd = _resolve_text(str(vals.get("password") or ""), variables)
+            if user or pwd:
+                import base64 as _b64
+                enc = _b64.b64encode(f"{user}:{pwd}".encode()).decode()
+                return {"Authorization": f"Basic {enc}"}
+        if atype == "apikey":
+            vals = {e.get("key"): e.get("value") for e in auth.get("apikey") or [] if isinstance(e, dict)}
+            key = _resolve_text(str(vals.get("key") or ""), variables)
+            val = _resolve_text(str(vals.get("value") or ""), variables)
+            if key and val:
+                return {key: val}
+    return {}
+
+
+def postman_auth_headers(path, variables: Optional[dict] = None) -> dict:
+    """Достаёт готовые auth-заголовки из Postman-коллекции и окружения.
+
+    Смотрит:
+      • заголовки Cookie/Authorization в запросах коллекции ({{var}} раскрываются
+        collection-vars + variables);
+      • Postman auth-блоки коллекции/запросов (bearer/basic/apikey);
+      • env-переменные sessionCookie/cookie/... → Cookie, token/jwt/... → Bearer.
+
+    Возвращает dict вида {"Cookie": "...", "Authorization": "Bearer ..."}.
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
+    if not isinstance(data, dict) or "item" not in data:
+        return {}
+    env_vars: dict[str, str] = {}
+    if variables:
+        env_vars = {str(k): str(v) for k, v in variables.items() if v is not None}
+
+    base_vars: dict[str, str] = {}
+    for v in _postman_variable_list(data):
+        if v.get("enabled") and v.get("value") is not None:
+            base_vars[str(v["key"])] = str(v["value"])
+    base_vars.update(env_vars)
+
+    out: dict[str, str] = {}
+    # 1) env → Cookie / Authorization
+    for key, val in env_vars.items():
+        low = key.strip().lower()
+        if low in _COOKIE_VAR_NAMES and val.strip():
+            out.setdefault("Cookie", val.strip())
+        elif low in _TOKEN_VAR_NAMES and val.strip():
+            if val.strip().lower().startswith(("bearer ", "basic ")):
+                out.setdefault("Authorization", val.strip())
+            else:
+                out.setdefault("Authorization", f"Bearer {val.strip()}")
+
+    # 2) auth-блоки и заголовки запросов
+    def _walk(items, inherited_auth: dict | None = None) -> None:
+        for it in items or []:
+            item_auth = it.get("auth") if isinstance(it, dict) else None
+            auth_ctx = item_auth if isinstance(item_auth, dict) else inherited_auth
+            req = it.get("request") if isinstance(it, dict) else None
+            if req:
+                headers = {}
+                for h in (req.get("header") or []):
+                    k = str(h.get("key") or "").strip()
+                    if k:
+                        headers[k] = _resolve_text(str(h.get("value") or ""), base_vars)
+                for hname, hval in headers.items():
+                    low = hname.lower()
+                    if low == "cookie" and hval.strip():
+                        out.setdefault("Cookie", hval.strip())
+                    elif low == "authorization" and hval.strip():
+                        out.setdefault("Authorization", hval.strip())
+                if auth_ctx:
+                    for k, v in _item_auth({"auth": auth_ctx}, base_vars).items():
+                        out.setdefault(k, v)
+            _walk(it.get("item") or [], auth_ctx)
+
+    _collection_auth = data.get("auth") if isinstance(data.get("auth"), dict) else None
+    _walk(data.get("item") or [], _collection_auth)
+    return out
+
+
+def postman_login_request(path, variables: Optional[dict] = None) -> Optional[dict]:
+    """Находит login-запрос Postman-коллекции для авто-логина/SessionManager.
+
+    Ищет POST/PUT запрос, в form/json-теле которого есть поля вида
+    username/login/email/user + password/pass/pwd (+ possibly otp/code).
+    Подставляет переменные коллекции и окружения.
+
+    Возвращает {"method","url","headers","body": dict,"content_type":"form"|"json",
+                "otp_field": str|None} или None.
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
+    if not isinstance(data, dict) or "item" not in data:
+        return None
+    known: dict[str, str] = {}
+    for v in _postman_variable_list(data):
+        if v.get("enabled") and v.get("value") is not None:
+            known[str(v["key"])] = str(v["value"])
+    if variables:
+        known.update({str(k): str(v) for k, v in variables.items() if v is not None})
+
+    user_names = {"username", "user", "login", "email", "user_name", "userid", "account"}
+    pass_names = {"password", "pass", "pwd", "passwd", "secret"}
+    otp_names = {"otp", "code", "otpcode", "otp_code", "token2fa", "mfa", "2fa"}
+
+    found: Optional[dict] = None
+
+    def _walk(items) -> None:
+        nonlocal found
+        for it in items or []:
+            req = it.get("request") if isinstance(it, dict) else None
+            if req and found is None:
+                method = str(req.get("method") or "GET").upper()
+                if method not in ("POST", "PUT", "PATCH"):
+                    continue
+                url_obj = req.get("url") or {}
+                url = url_obj.get("raw") or ""
+                if not url:
+                    continue
+                url = _resolve_text(url, known)
+                body_obj = req.get("body") or {}
+                content_type = str(body_obj.get("mode") or "").lower()
+                body: dict[str, str] = {}
+                if content_type == "urlencoded":
+                    for f in (body_obj.get("urlencoded") or []):
+                        k = str(f.get("key") or "").strip()
+                        if k:
+                            body[k] = _resolve_text(str(f.get("value") or ""), known)
+                elif content_type == "raw":
+                    raw = _resolve_text(str(body_obj.get("raw") or ""), known)
+                    ct = ""
+                    for h in (req.get("header") or []):
+                        if str(h.get("key") or "").lower() == "content-type":
+                            ct = str(h.get("value") or "").lower()
+                    try:
+                        if "json" in ct or raw.lstrip().startswith("{"):
+                            parsed = json.loads(raw)
+                            if isinstance(parsed, dict):
+                                body = {str(k): str(v) for k, v in parsed.items()}
+                                content_type = "json"
+                        elif "=" in raw:
+                            from urllib.parse import parse_qsl
+                            body = dict(parse_qsl(raw, keep_blank_values=True))
+                            content_type = "form"
+                    except Exception:
+                        body = {}
+                if not body:
+                    continue
+                keys_low = {k.lower() for k in body}
+                has_user = any(k in user_names for k in keys_low)
+                has_pass = any(k in pass_names for k in keys_low)
+                if not (has_user and has_pass):
+                    continue
+                headers = {}
+                for h in (req.get("header") or []):
+                    k = str(h.get("key") or "").strip()
+                    if k:
+                        headers[k] = _resolve_text(str(h.get("value") or ""), known)
+                otp_field = next((k for k in body if k.lower() in otp_names), None)
+                found = {
+                    "method": method,
+                    "url": url,
+                    "headers": headers,
+                    "body": body,
+                    "content_type": "json" if content_type == "json" else "form",
+                    "otp_field": otp_field,
+                }
+            _walk(it.get("item") or [])
+
+    _walk(data.get("item") or [])
+    return found
+
+
 def import_collection(path, variables: Optional[dict] = None) -> list[dict]:
     """Автоопределение формата по расширению/содержимому.
 
