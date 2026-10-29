@@ -70,7 +70,7 @@ and reports.
 ## Install
 
 ```bash
-git clone https://github.com/<owner>/notscan.git
+git clone https://github.com/Nottopbut/notscan.git
 cd notscan
 python -m pip install -r requirements.txt
 ```
