@@ -686,3 +686,29 @@ class TestMatchOpenRedirectRelative:
         assert scanner_core.match_open_redirect(
             "//evil.com/", "", 302, {"Location": "/login"}
         ) is None
+
+
+# ══════════════════════════════════════════════════════════════════
+#  10. ScanTask: обратная совместимость после добавления pair_* полей
+# ══════════════════════════════════════════════════════════════════
+
+def test_scan_task_pair_fields_have_defaults():
+    """sqli_blind добавил pair_payload/pair_url/pair_headers/pair_body — с дефолтами."""
+    task = scanner_core.ScanTask(
+        template_id="hist-1-sqli-query-id",
+        check_type="sqli",
+        payload="'",
+        method="GET",
+        url="http://example.test/item?id=%27",
+        headers={"Host": "example.test"},
+        body=b"",
+        raw_http="",
+        mutation_point="query",
+        original_param="id",
+        history_id=1,
+    )
+    assert task.pair_payload == ""
+    assert task.pair_url == ""
+    assert task.pair_headers == {}
+    assert task.pair_body == b""
+    assert task.is_pair is False

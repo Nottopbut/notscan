@@ -67,6 +67,15 @@ SLEEP_PAYLOADS = [("lab_sleep_sqlite", SLEEP_PAYLOAD, 0.3, "SQLite")]
 #: Быстрый sleep лабы в тестах (по контракту default — 4.0 c).
 FAST_SLEEP_SECONDS = 1.5
 
+#: Пары для boolean-based blind SQLi (формат "true ||| false").
+BLIND_SQLI_PAYLOADS = [
+    "1 AND 1=1 ||| 1 AND 1=2",
+    "1 AND 2=2 ||| 1 AND 2=3",
+    "' AND '1'='1 ||| ' AND '1'='2",
+    "1' AND '1'='1 ||| 1' AND '1'='2",
+    "1 AND 1=1-- - ||| 1 AND 1=2-- -",
+]
+
 
 @pytest.fixture()
 def lab(tmp_path):
@@ -408,3 +417,62 @@ def test_lab_server_request_log_and_csrf_page(lab):
     assert f'value="{CSRF_TOKEN}"' in cap.response_body.decode("utf-8")
     assert lab.server.requests_for("/form", "GET")
     assert lab.server.count("/form", "GET") >= 1
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Boolean-based blind SQLi (sqli_blind)
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_blind_sqli_detected_on_lab(lab):
+    """/blind (boolean SQLi) → находка sqli_blind с detector="blind"."""
+    history_id = lab.add_get("/blind", {"id": "1"})
+    result = lab.build_and_run(
+        [history_id],
+        checks=["sqli_blind"],
+        payloads={"sqli_blind": BLIND_SQLI_PAYLOADS},
+    )
+    hits = result.findings(check_type="sqli_blind", url_contains="/blind")
+    assert hits, (
+        "blind SQLi не найдена; evidence="
+        f"{[r.get('evidence') for r in result.rows]}"
+    )
+    assert any("Blind SQLi (boolean)" in (h.get("evidence") or "") for h in hits)
+    assert any(
+        "true/false responses differ" in (h.get("evidence") or "") for h in hits
+    )
+
+    meta = harness.sqlite_rows(
+        "SELECT detector, confidence, severity FROM scan_meta WHERE scan_result_id=?",
+        (hits[0]["id"],),
+    )
+    assert meta, "scan_meta не записан"
+    assert meta[0]["detector"] == "blind", meta
+    assert float(meta[0]["confidence"]) >= 0.7, meta
+    assert meta[0]["severity"] == "HIGH", meta
+
+    # Второй (false) запрос действительно ушёл на сервер: 2 запроса на пару.
+    assert lab.server.count("/blind") >= 2 * len(BLIND_SQLI_PAYLOADS)
+
+
+@pytest.mark.parametrize(
+    "path,params",
+    [
+        ("/safe", {"q": "x"}),
+        ("/search", {"q": "hello"}),
+        ("/sqli", {"id": "1"}),
+        ("/reflect", {"q": "hello"}),
+    ],
+)
+def test_blind_sqli_no_fp_on_safe_endpoints(lab, path, params):
+    """FP-контроль: /safe, /search, /sqli, /reflect не дают blind-находок."""
+    history_id = lab.add_get(path, params)
+    result = lab.build_and_run(
+        [history_id],
+        checks=["sqli_blind"],
+        payloads={"sqli_blind": BLIND_SQLI_PAYLOADS},
+    )
+    hits = result.findings(check_type="sqli_blind")
+    assert not hits, (
+        f"FP blind SQLi на {path}: {[h.get('evidence') for h in hits]}"
+    )

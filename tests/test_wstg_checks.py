@@ -268,11 +268,11 @@ def test_catalog_interface_is_stable():
 
 
 def test_catalog_complete_and_unique():
-    """38 чеков: 24 существующих + pseudo info_disclosure_paths + 13 новых."""
-    assert len(CHECK_CATALOG) == 38, f"ожидали 38 чеков, получили {len(CHECK_CATALOG)}"
+    """39 чеков: 24 существующих + pseudo info_disclosure_paths + 14 новых."""
+    assert len(CHECK_CATALOG) == 39, f"ожидали 39 чеков, получили {len(CHECK_CATALOG)}"
     ids = [cd.check_id for cd in CHECK_CATALOG]
     assert len(ids) == len(set(ids)), "check_id в каталоге должны быть уникальны"
-    assert len(by_kind("active")) == 16
+    assert len(by_kind("active")) == 17
     assert len(by_kind("passive")) == 16
     assert len(by_kind("probe")) == 6
     assert ACTIVE_CHECK_IDS == tuple(c.check_id for c in by_kind("active"))

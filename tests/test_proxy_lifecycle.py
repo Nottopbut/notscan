@@ -158,19 +158,23 @@ class TestShouldIdleStop:
 class TestProxySettings:
     def test_defaults(self):
         opts = proxy_settings(None)
-        assert opts["proxy_autostart"] is True
+        # Прокси НЕ должен стартовать сам по умолчанию — только по кнопке.
+        assert opts["proxy_autostart"] is False
         assert opts["proxy_stop_on_browser_exit"] is True
         assert opts["proxy_idle_stop_min"] == 15
+        assert opts["proxy_filter_noise"] is True
 
     def test_overrides_and_normalization(self):
         opts = proxy_settings({
-            "proxy_autostart": False,
+            "proxy_autostart": True,
             "proxy_stop_on_browser_exit": 0,
             "proxy_idle_stop_min": "7",
+            "proxy_filter_noise": False,
         })
-        assert opts["proxy_autostart"] is False
+        assert opts["proxy_autostart"] is True
         assert opts["proxy_stop_on_browser_exit"] is False
         assert opts["proxy_idle_stop_min"] == 7.0
+        assert opts["proxy_filter_noise"] is False
 
     def test_invalid_values_fall_back(self):
         opts = proxy_settings({"proxy_idle_stop_min": "abc"})
@@ -338,3 +342,67 @@ def test_proxy_runner_start_stop_releases_port():
             runner.stop(wait=True)
         except Exception:
             pass
+
+
+# ──────────── фоновый шум браузера (Google telemetry и т.п.) ────────────
+
+def test_noise_host_detection():
+    import mitm_proxy
+
+    # типичный фоновый шум Chromium/Google
+    assert mitm_proxy.is_noise_host("update.googleapis.com") is True
+    assert mitm_proxy.is_noise_host("accounts.google.com") is True
+    assert mitm_proxy.is_noise_host("www.google-analytics.com") is True
+    assert mitm_proxy.is_noise_host("ssl.gstatic.com") is True
+    assert mitm_proxy.is_noise_host("UPDATE.GOOGLEAPIS.COM") is True
+    assert mitm_proxy.is_noise_host("update.googleapis.com.") is True
+    # обычные цели/домены — не шум
+    assert mitm_proxy.is_noise_host("example.com") is False
+    assert mitm_proxy.is_noise_host("127.0.0.1") is False
+    assert mitm_proxy.is_noise_host("localhost:8080") is False
+    assert mitm_proxy.is_noise_host("") is False
+
+
+def test_proxy_setting_defaults_autostart_off_and_noise_filter_on():
+    import mitm_proxy
+
+    opts = mitm_proxy.proxy_settings({})
+    assert opts["proxy_autostart"] is False, "прокси не должен авто-стартовать по умолчанию"
+    assert opts["proxy_filter_noise"] is True
+    assert opts["proxy_stop_on_browser_exit"] is True
+    assert opts["proxy_idle_stop_min"] == 15
+    # явные настройки уважаются
+    opts = mitm_proxy.proxy_settings(
+        {"proxy_autostart": True, "proxy_filter_noise": False, "proxy_idle_stop_min": 0}
+    )
+    assert opts["proxy_autostart"] is True
+    assert opts["proxy_filter_noise"] is False
+    assert opts["proxy_idle_stop_min"] == 0
+
+
+def test_logger_addon_filters_noise_without_db():
+    import mitm_proxy
+
+    class _Req:
+        host = "update.googleapis.com"
+
+    class _Flow:
+        request = _Req()
+
+    logs: list[str] = []
+    addon = mitm_proxy.LoggerAddon(log_callback=logs.append, filter_noise=True)
+    # Шум отфильтрован: в БД не пишем, activity для idle не обновляем.
+    addon.response(_Flow())
+    assert addon.filtered_noise_count == 1
+    assert logs and "отфильтрован" in logs[0]
+
+    class _Req2:
+        host = "example.com"
+
+    class _Flow2:
+        request = _Req2()
+
+    # filter_noise=False — обычный поток (здесь специально не зовём response():
+    # без БД он упадёт; проверяем только флаг).
+    off = mitm_proxy.LoggerAddon(log_callback=lambda _s: None, filter_noise=False)
+    assert off.filter_noise is False

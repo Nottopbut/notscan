@@ -56,6 +56,7 @@ import scanner_core
 import path_probe
 from mitm_proxy import (
     ProxyRunner,
+    is_noise_host,
     find_free_port,
     port_is_free,
     proxy_settings,
@@ -2023,6 +2024,8 @@ class App(tk.Tk):
         ttk.Checkbutton(hist_toolbar, text="Use contracts", variable=self._use_contracts_var).pack(side=tk.LEFT, padx=8)
         ttk.Button(hist_toolbar, text="＋ Add to Scan list", command=self._add_selected_to_scan).pack(side=tk.LEFT, padx=4)
         ttk.Button(hist_toolbar, text="🗑 Clear history", command=self._clear_history).pack(side=tk.LEFT, padx=4)
+        ttk.Button(hist_toolbar, text="🧹 Clear browser noise",
+                   command=self._clear_browser_noise).pack(side=tk.LEFT, padx=4)
 
         # Host/URL search — quick endpoint lookup by host/substring
         hist_search = ttk.Frame(hist_frame)
@@ -2297,11 +2300,23 @@ class App(tk.Tk):
 
         _popts = self._get_proxy_settings()
         self._proxy_autostart_var = tk.BooleanVar(
-            value=bool(_popts.get("proxy_autostart", True)))
+            value=bool(_popts.get("proxy_autostart", False)))
         ttk.Checkbutton(
             tab,
-            text="Auto-start proxy when app launches (no Stop button — lifecycle is automatic)",
+            text="Auto-start proxy when app launches (default OFF — start it with the "
+                 "«▶ Start Proxy + Browser» button)",
             variable=self._proxy_autostart_var,
+            command=self._save_proxy_settings,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", padx=12, pady=2)
+        row += 1
+
+        self._proxy_filter_noise_var = tk.BooleanVar(
+            value=bool(_popts.get("proxy_filter_noise", True)))
+        ttk.Checkbutton(
+            tab,
+            text="Filter browser background noise from History (Google telemetry/updates, "
+                 "safe-browsing, connectivity checks)",
+            variable=self._proxy_filter_noise_var,
             command=self._save_proxy_settings,
         ).grid(row=row, column=0, columnspan=2, sticky="w", padx=12, pady=2)
         row += 1
@@ -2554,6 +2569,9 @@ class App(tk.Tk):
             var = getattr(self, "_proxy_stop_on_browser_exit_var", None)
             if var is not None:
                 opts["proxy_stop_on_browser_exit"] = bool(var.get())
+            var = getattr(self, "_proxy_filter_noise_var", None)
+            if var is not None:
+                opts["proxy_filter_noise"] = bool(var.get())
             var = getattr(self, "_proxy_idle_min_var", None)
             if var is not None:
                 try:
@@ -2622,7 +2640,12 @@ class App(tk.Tk):
 
         self._proxy_starting = True
         try:
-            self._proxy_runner = ProxyRunner(host=host, port=port, log_callback=self.log)
+            self._proxy_runner = ProxyRunner(
+                host=host,
+                port=port,
+                log_callback=self.log,
+                filter_noise=bool(self._get_proxy_settings().get("proxy_filter_noise", True)),
+            )
             try:
                 self._proxy_runner.start()
             except Exception as exc:
@@ -2649,8 +2672,11 @@ class App(tk.Tk):
             self.log("[PROXY] auto-start disabled (NOTSCAN_DISABLE_PROXY_AUTOSTART=1)")
             return
         try:
-            if not self._get_proxy_settings().get("proxy_autostart", True):
-                self.log("[PROXY] auto-start disabled in Settings")
+            if not self._get_proxy_settings().get("proxy_autostart", False):
+                self.log(
+                    "[PROXY] Прокси не запущен (авто-старт выключен). Нажми "
+                    "«▶ Start Proxy + Browser», чтобы запустить прокси и открыть браузер."
+                )
                 return
         except Exception:
             pass
@@ -3018,12 +3044,21 @@ class App(tk.Tk):
             "--disable-default-apps",
             "--disable-ipc-flooding-protection",
             "--disable-notifications",
+            # минимизация фонового сетевого шума Chromium
+            "--disable-component-update",
+            "--disable-domain-reliability",
+            "--disable-client-side-phishing-detection",
+            "--disable-sync",
+            "--disable-component-extensions-with-background-pages",
             "--disable-speech-api",
             "--disable-permissions-api",
             "--disk-cache-size=0",
             "--media-cache-size=0",
             "--disable-features=ChromeWhatsNewUI,HttpsUpgrades,"
-            "TrackingProtection3pcd,LensOverlay",
+            "TrackingProtection3pcd,LensOverlay,"
+            "OptimizationHints,MediaRouter,Translate,AutofillServerCommunication,"
+            "CertificateTransparencyComponentUpdater,InterestFeedContentSuggestions,"
+            "NetworkTimeServiceQuerying",
             "--user-agent=Mozilla/5.0 (X11; Linux x86_64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36",
@@ -3071,6 +3106,38 @@ class App(tk.Tk):
             super().destroy()
         except tk.TclError:
             pass
+
+    def _clear_browser_noise(self) -> None:
+        """Удаляет из History фоновый шум браузера (Google telemetry/updates и т.п.).
+
+        Нужно для проектов, в историю которых шум попал ДО включения фильтра
+        proxy_filter_noise (новые такие запросы в History не пишутся).
+        """
+        try:
+            rows = db.fetch_history(limit=10000)
+        except Exception as exc:
+            mb.showerror("Clear browser noise", str(exc))
+            return
+        noise_ids = []
+        for row in rows:
+            try:
+                host = urlparse(row.get("url") or "").hostname or ""
+            except Exception:
+                host = ""
+            if host and is_noise_host(host):
+                noise_ids.append(int(row["id"]))
+        if not noise_ids:
+            self.log("[HISTORY] Фонового шума браузера в History не найдено")
+            return
+        if not mb.askyesno(
+            "Clear browser noise",
+            f"Найдено фоновых запросов браузера (Google/обновления и т.п.): "
+            f"{len(noise_ids)}.\nУдалить их из History?",
+        ):
+            return
+        deleted = db.delete_history_ids(noise_ids)
+        self._refresh_history()
+        self.log(f"[HISTORY] Удалено фоновых запросов: {deleted}")
 
     def _clear_history(self) -> None:
         if not mb.askyesno("Clear history", "Удалить всю историю запросов?"):

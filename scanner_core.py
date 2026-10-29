@@ -14,7 +14,7 @@ import re
 import threading
 import time
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional
 from urllib.parse import urlparse
@@ -194,7 +194,7 @@ def _severity_guess(check_type: str) -> str:
     ct = (check_type or "").lower()
     if ct in ("cmdi", "ssti", "deserialization", "file_upload", "ssi_injection"):
         return "HIGH"
-    if ct in ("sqli", "sqli_time", "xxe", "ssrf", "path_traversal"):
+    if ct in ("sqli", "sqli_time", "sqli_blind", "xxe", "ssrf", "path_traversal"):
         return "HIGH"
     if ct in ("xss", "xss_reflected", "xss_dom", "open_redirect", "crlf_injection",
               "html_injection", "cors", "ria_policy", "http_methods"):
@@ -412,6 +412,205 @@ def load_payloads(check_type: str, safe_mode: bool = True) -> list[str]:
     return payloads
 
 
+# ──────────────────────────── Boolean-blind SQLi helpers ────────────────────────────
+#
+# sqli_blind: каждая строка payload-файла — ПАРА «true_payload ||| false_payload».
+# Движок отправляет оба запроса и сравнивает ответы (status / length / similarity),
+# а false-ответ дополнительно сверяет с baseline из history.
+# Детекция — engine-side: checks/injections.SQLiBlindCheck нужен только для
+# консистентности каталог ↔ registry.
+
+BLIND_SQLI_CHECK = "sqli_blind"
+BLIND_PAYLOAD_DELIMITER = "|||"
+BLIND_TEXT_LIMIT = 65_536        # сравниваем не больше 64 KB тела
+BLIND_NORM_LIMIT = 4_096         # срез для SequenceMatcher (скорость)
+BLIND_SIM_DIFF = 0.97            # ниже — ответы значимо различаются
+BLIND_LEN_MIN_DIFF = 20
+BLIND_LEN_REL_DIFF = 0.03
+BLIND_MIN_BASELINE_SIM = 0.90
+BLIND_BASELINE_SIM_MARGIN = 0.05
+BLIND_FLOATING_SIM_EPS = 0.02
+
+
+def parse_blind_payload(pair_line: str) -> Optional[tuple[str, str]]:
+    """Парсит строку payload-файла sqli_blind: `true_payload ||| false_payload`."""
+    line = (pair_line or "").strip()
+    if not line or BLIND_PAYLOAD_DELIMITER not in line:
+        return None
+    true_payload, _sep, false_payload = line.partition(BLIND_PAYLOAD_DELIMITER)
+    true_payload = true_payload.strip()
+    false_payload = false_payload.strip()
+    if not true_payload or not false_payload:
+        return None
+    if true_payload == false_payload:
+        return None
+    return true_payload, false_payload
+
+
+def normalize_blind_text(text: str) -> str:
+    """Нормализация тела ответа: collapse whitespace, нижний регистр, срез."""
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text).strip().lower()[:BLIND_NORM_LIMIT]
+
+
+def _blind_echo_mask(text: str, payload: str) -> str:
+    """Удаляет из текста эхо payload'а (raw / URL-encoded / JSON-escaped формы).
+
+    Отражённый payload сам по себе не должен выглядеть как различие ответов:
+    иначе любой echo-эндпоинт даёт FP на blind-детекции.
+    """
+    if not text or not payload:
+        return text
+    masked = text
+    variants = {
+        payload,
+        urllib.parse.quote(payload, safe=""),
+        json.dumps(payload)[1:-1],
+        urllib.parse.quote(payload, safe="").replace("%", "%25"),
+    }
+    for variant in sorted((v for v in variants if v), key=len, reverse=True):
+        masked = masked.replace(variant, "")
+    return masked
+
+
+def _blind_similarity(first: str, second: str) -> float:
+    """similarity двух нормализованных текстов (0..1), безопасно для пустых."""
+    if not first and not second:
+        return 1.0
+    return difflib.SequenceMatcher(None, first, second).ratio()
+
+
+@dataclass
+class BlindResult:
+    """Результат сравнения true/false пары для boolean-blind SQLi."""
+
+    evidence: str
+    confidence: float
+    status_diff: bool
+
+
+def evaluate_blind_pair(
+    *,
+    true_status: Optional[int],
+    true_text: str,
+    false_status: Optional[int],
+    false_text: str,
+    payload_true: str = "",
+    payload_false: str = "",
+    baseline_text: str = "",
+    baseline_status: Optional[int] = None,
+) -> Optional[BlindResult]:
+    """Решает, является ли разница true/false ответов boolean-blind SQLi.
+
+    Критерии (FIX_CONTRACT/task-14):
+      • оба запроса без transport error (status задан);
+      • ответы значимо различаются: status_diff ИЛИ len_diff >= max(20, 3%) ИЛИ
+        similarity < 0.97 (после маскировки эха payload'ов);
+      • нет baseline → принимаем ТОЛЬКО status_diff (body-diff без baseline — FP);
+      • есть baseline → similarity(false, baseline) >= max(similarity(true,
+        baseline)+0.05, 0.90) ИЛИ (status_false == baseline_status и
+        status_true != baseline_status); «плавающие» одинаково похожие ответы не
+        флагаем;
+      • одинаковые 4xx/5xx (WAF/error) — не сигнал.
+
+    Возвращает BlindResult (evidence + confidence 0.7 при status-diff / 0.55 при
+    body-diff) или None.
+    """
+    if true_status is None or false_status is None:
+        return None
+
+    true_text = (true_text or "")[:BLIND_TEXT_LIMIT]
+    false_text = (false_text or "")[:BLIND_TEXT_LIMIT]
+    base_text = (baseline_text or "")[:BLIND_TEXT_LIMIT]
+
+    masked_true = _blind_echo_mask(true_text, payload_true)
+    masked_false = _blind_echo_mask(false_text, payload_false)
+
+    len_true, len_false = len(true_text), len(false_text)
+    status_diff = true_status != false_status
+    len_diff = abs(len_true - len_false) >= max(
+        BLIND_LEN_MIN_DIFF, BLIND_LEN_REL_DIFF * max(len_true, len_false)
+    )
+    sim_true_false = _blind_similarity(
+        normalize_blind_text(masked_true), normalize_blind_text(masked_false)
+    )
+    differ = status_diff or len_diff or (sim_true_false < BLIND_SIM_DIFF)
+    if not differ:
+        return None
+    # Одинаковые 4xx/5xx (WAF/ошибка) — не blind-сигнал.
+    if true_status == false_status and true_status >= 400:
+        return None
+
+    has_baseline = bool(base_text) or baseline_status is not None
+    baseline_note = ""
+    if has_baseline:
+        masked_base = _blind_echo_mask(base_text, payload_true)
+        norm_true_base = normalize_blind_text(masked_true)
+        norm_false_base = normalize_blind_text(masked_false)
+        norm_base = normalize_blind_text(masked_base)
+        sim_false_base = _blind_similarity(norm_false_base, norm_base) if (base_text and norm_base) else 0.0
+        sim_true_base = _blind_similarity(norm_true_base, norm_base) if (base_text and norm_base) else 0.0
+        # Baseline может соответствовать как true-, так и false-состоянию
+        # (уязвимый параметр часто отдаёт «нормальную» страницу = true). Поэтому
+        # требуем, чтобы ОДНА сторона пары заметно сильнее походила на baseline,
+        # и/или чтобы статус одной стороны совпал с baseline, а другой — нет.
+        status_false_match = (
+            baseline_status is not None
+            and false_status == baseline_status
+            and true_status != baseline_status
+        )
+        status_true_match = (
+            baseline_status is not None
+            and true_status == baseline_status
+            and false_status != baseline_status
+        )
+        status_match = status_false_match or status_true_match
+        sim_ok = False
+        similar_side = "false" if status_false_match else "true"
+        best_sim = 0.0
+        sim_diff = abs(sim_true_base - sim_false_base)
+        if base_text and norm_base:
+            best_is_false = sim_false_base >= sim_true_base
+            best_sim = sim_false_base if best_is_false else sim_true_base
+            other_sim = sim_true_base if best_is_false else sim_false_base
+            similar_side = "false" if best_is_false else "true"
+            sim_ok = best_sim >= max(
+                other_sim + BLIND_BASELINE_SIM_MARGIN, BLIND_MIN_BASELINE_SIM
+            )
+        if not (sim_ok or status_match):
+            return None
+        if base_text and norm_base and not status_match:
+            # «Плавающий» ответ: true и false почти одинаково похожи на baseline.
+            if sim_diff < max(BLIND_FLOATING_SIM_EPS, BLIND_BASELINE_SIM_MARGIN):
+                return None
+        if base_text and norm_base:
+            baseline_note = (
+                f"; {similar_side} matches baseline "
+                f"(status {false_status if similar_side == 'false' else true_status}/"
+                f"{baseline_status}, sim {best_sim:.2f})"
+            )
+        else:
+            baseline_note = (
+                f"; {similar_side} matches baseline (status "
+                f"{false_status if similar_side == 'false' else true_status}/"
+                f"{baseline_status})"
+            )
+    else:
+        # Без baseline body-diff не считается находкой (FP-контроль): только status-diff.
+        if not status_diff:
+            return None
+        baseline_note = "; no baseline: status-diff only"
+
+    confidence = 0.7 if status_diff else 0.55
+    evidence = (
+        "Blind SQLi (boolean): true/false responses differ "
+        f"(status {true_status} vs {false_status}; len {len_true} vs {len_false}; "
+        f"sim {sim_true_false:.2f}){baseline_note}"
+    )
+    return BlindResult(evidence=evidence, confidence=confidence, status_diff=status_diff)
+
+
 # ──────────────────────────── Task dataclass ────────────────────────────
 
 @dataclass
@@ -427,6 +626,19 @@ class ScanTask:
     mutation_point: str
     original_param: str
     history_id: Optional[int] = None  # for checks runner / scope
+
+    # ── Boolean-blind SQLi (sqli_blind): готовый второй запрос пары ──
+    # Поля с дефолтами — обратная совместимость: старые конструкторы/тесты
+    # и все остальные чеки работают без изменений.
+    pair_payload: str = ""                    # false-payload (payload — true-payload)
+    pair_url: str = ""                        # готовый URL для false-запроса
+    pair_headers: dict[str, str] = field(default_factory=dict)
+    pair_body: bytes = b""
+
+    @property
+    def is_pair(self) -> bool:
+        """True, если задача — пара для boolean-blind сравнения ответов."""
+        return bool(self.pair_payload and self.pair_url)
 
 
 # ──────────────────────────── Tamper helpers ────────────────────────────
@@ -510,7 +722,7 @@ def build_scan_tasks(
         # url params: focus ssrf/open_redirect; deprioritize sql/cmd/ssti unless explicitly allowed
         if pt == "url" and ct in ("ssrf", "open_redirect"):
             return mp == "query"
-        if pt == "url" and ct in ("sqli", "sqli_time", "cmdi", "ssti", "xxe"):
+        if pt == "url" and ct in ("sqli", "sqli_time", "sqli_blind", "cmdi", "ssti", "xxe"):
             return False
 
         # json-like params: prefer NoSQLi/deserialization, avoid open_redirect
@@ -679,7 +891,7 @@ def build_scan_tasks(
                         continue
 
                     # SQLi/CMDi/SSTI: mostly query or body, rarely headers
-                    if ct in ("sqli", "sqli_time", "cmdi", "ssti") and mp == "headers":
+                    if ct in ("sqli", "sqli_time", "sqli_blind", "cmdi", "ssti") and mp == "headers":
                         continue
 
                     # Path traversal: prefer file/path-ish parameter names
@@ -690,6 +902,70 @@ def build_scan_tasks(
                 for payload in payloads:
                     if not _is_type_ok(check_type, mutation.mutation_point, mutation.original_param, content_type, contract):
                         continue
+
+                    # ── Boolean-blind SQLi (sqli_blind): payload — это ПАРА ──
+                    # Строка файла: "true_payload ||| false_payload". Готовим ОБА
+                    # запроса здесь (url/headers/body), чтобы false-запрос точно
+                    # совпадал с true по методу/эндпоинту/заголовкам и отличался
+                    # только подставленным payload'ом (в т.ч. URL-encoded/JSON-
+                    # escaped формах — apply_payload делает это корректно).
+                    if check_type_lower == BLIND_SQLI_CHECK:
+                        blind_pair = parse_blind_payload(payload)
+                        if blind_pair is None:
+                            logger.debug(
+                                "sqli_blind: пропущена некорректная пара %r", payload
+                            )
+                            continue
+                        true_payload, false_payload = blind_pair
+                        if safe_mode and (
+                            _is_destructive_payload(true_payload)
+                            or _is_destructive_payload(false_payload)
+                        ):
+                            continue  # safe mode: только булевы условия
+                        (
+                            final_url_true,
+                            final_headers_true,
+                            final_body_true,
+                        ) = _apply_payload_with_encoder(mutation, true_payload)
+                        (
+                            final_url_false,
+                            final_headers_false,
+                            final_body_false,
+                        ) = _apply_payload_with_encoder(mutation, false_payload)
+                        final_headers_true = {
+                            k: v
+                            for k, v in final_headers_true.items()
+                            if k.lower() != "content-length"
+                        }
+                        final_headers_false = {
+                            k: v
+                            for k, v in final_headers_false.items()
+                            if k.lower() != "content-length"
+                        }
+                        tasks.append(
+                            ScanTask(
+                                template_id=(
+                                    f"hist-{history_id}-{check_type}"
+                                    f"-{mutation.mutation_point}-{mutation.original_param}"
+                                ),
+                                check_type=check_type,
+                                payload=true_payload,
+                                method=method,
+                                url=final_url_true,
+                                headers=final_headers_true,
+                                body=final_body_true,
+                                raw_http=mutation.raw_http,
+                                mutation_point=mutation.mutation_point,
+                                original_param=mutation.original_param,
+                                history_id=history_id,
+                                pair_payload=false_payload,
+                                pair_url=final_url_false,
+                                pair_headers=final_headers_false,
+                                pair_body=final_body_false,
+                            )
+                        )
+                        continue
+
                     # (payload_used, encoder_mode): base-задача + tamper-варианты
                     variants: list[tuple[str, Optional[str]]] = [(payload, None)]
                     for mode in tamper_for_check:
@@ -1546,6 +1822,8 @@ def _persist_task_result(
     baseline_text: str,
     baseline_row: Optional[dict],
     log_cb: Callable[[str], None],
+    detector: str = "matcher",
+    confidence: Optional[float] = None,
 ) -> None:
     """Все синхронные записи по одной задаче (вызывается через asyncio.to_thread).
 
@@ -1576,19 +1854,21 @@ def _persist_task_result(
         base_expl = 0.1
         if ct in ("cmdi", "ssti", "deserialization", "file_upload"):
             base_expl = 0.7
-        elif ct in ("sqli", "sqli_time", "xxe", "ssrf", "path_traversal"):
+        elif ct in ("sqli", "sqli_time", "sqli_blind", "xxe", "ssrf", "path_traversal"):
             base_expl = 0.6
         elif ct in ("xss", "xss_reflected", "xss_dom", "open_redirect", "crlf_injection"):
             base_expl = 0.4
         expl = min(0.95, base_expl + (0.15 if evidence else 0.0))
+        if confidence is None:
+            confidence = 0.65 if evidence else 0.15
         db.upsert_scan_meta(
             scan_result_id=result_id,
             history_id=task.history_id,
             mutation_point=task.mutation_point,
             original_param=task.original_param,
             payload_class=task.check_type,
-            detector="matcher",
-            confidence=0.65 if evidence else 0.15,
+            detector=detector,
+            confidence=confidence,
             severity=_severity_guess(task.check_type),
             exploitability=expl,
             fingerprint=fp,
@@ -1612,7 +1892,7 @@ def _persist_task_result(
     # Self-calibration: update per-host baseline timing and typical 5xx rate
     # (кроме time-based sqli: его задержки — искусственные).
     try:
-        if (task.check_type or "").lower() != "sqli_time":
+        if (task.check_type or "").lower() not in ("sqli_time", "sqli_blind"):
             host = urlparse(task.url).hostname or ""
             if host:
                 prev = db.fetch_host_calibration(host) or {}
@@ -1955,6 +2235,9 @@ class ScannerRunner:
         baseline_status: Optional[int] = None
         baseline_row: Optional[dict] = None
         resp: Optional[httpx.Response] = None
+        # sqli_blind: детектор/уверенность для scan_meta (matcher по умолчанию).
+        blind_detector = "matcher"
+        blind_confidence: Optional[float] = None
 
         try:
             if self._rate_limiter is not None:
@@ -2036,17 +2319,74 @@ class ScannerRunner:
             except Exception:
                 baseline_row = None
 
-            evidence = run_matcher(
-                task.check_type,
-                task.payload,
-                resp_text,
-                status_code=status_code or 0,
-                response_headers=dict(resp.headers),
-            )
+            # ── Boolean-blind SQLi (sqli_blind): второй (false) запрос пары ──
+            # Второй запрос идёт тем же AsyncClient, с теми же method/headers и
+            # follow_redirects=False; отличается только подставленный payload.
+            if task.check_type.lower() == BLIND_SQLI_CHECK and task.is_pair:
+                false_status: Optional[int] = None
+                false_text = ""
+                false_headers = _merge_session_headers(
+                    task.pair_headers or task.headers, session_headers
+                )
+                try:
+                    if self._rate_limiter is not None:
+                        await self._rate_limiter.acquire_async()
+                    false_resp = await client.request(
+                        method=task.method,
+                        url=task.pair_url,
+                        headers=false_headers,
+                        content=task.pair_body if task.pair_body else None,
+                        follow_redirects=False,
+                    )
+                    false_status = false_resp.status_code
+                    false_text = false_resp.text[:BLIND_TEXT_LIMIT]
+                except asyncio.CancelledError:
+                    raise
+                except Exception as pair_exc:
+                    # Ошибка/таймаут второго запроса — пару не считаем.
+                    logger.debug("sqli_blind: false-запрос не выполнен: %s", pair_exc)
+                    self.log_cb(
+                        f"[BLIND][WARN] false-запрос пары не выполнен "
+                        f"({task.url[:60]}): {pair_exc}"
+                    )
+                if false_status is not None:
+                    blind_result = evaluate_blind_pair(
+                        true_status=status_code,
+                        true_text=resp_text,
+                        false_status=false_status,
+                        false_text=false_text,
+                        payload_true=task.payload,
+                        payload_false=task.pair_payload,
+                        baseline_text=baseline_text,
+                        baseline_status=baseline_status,
+                    )
+                    if blind_result is not None:
+                        evidence = blind_result.evidence
+                        blind_detector = "blind"
+                        blind_confidence = blind_result.confidence
+                        self.log_cb(
+                            f"[BLIND] {task.original_param} @ {task.url[:80]} | "
+                            f"{blind_result.evidence[:140]}"
+                        )
+                    else:
+                        logger.debug(
+                            "sqli_blind: пара неразличима (status %s/%s, url=%s)",
+                            status_code, false_status, task.url[:80],
+                        )
+
+            if evidence is None:
+                evidence = run_matcher(
+                    task.check_type,
+                    task.payload,
+                    resp_text,
+                    status_code=status_code or 0,
+                    response_headers=dict(resp.headers),
+                )
 
             # Подавление ложных срабатываний: если тот же матчер срабатывает и на
             # baseline-ответе (без мутации), значит сигнал не вызван нашим payload.
-            if evidence and baseline_text:
+            # (blind-детекция уже baseline-aware — её не подавляем повторно.)
+            if evidence and blind_detector != "blind" and baseline_text:
                 try:
                     _baseline_headers = None
                     if baseline_row:
@@ -2119,6 +2459,8 @@ class ScannerRunner:
                 baseline_text,
                 baseline_row,
                 self.log_cb,
+                detector=blind_detector,
+                confidence=blind_confidence,
             )
         except asyncio.CancelledError:
             raise

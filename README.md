@@ -13,7 +13,7 @@ and reports.
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey)
 ![WSTG](https://img.shields.io/badge/OWASP-WSTG%20v4.2%2Fv5-orange)
-![checks](https://img.shields.io/badge/checks-38%20(16%20active%20%2F%2016%20passive%20%2F%206%20probe)-informational)
+![checks](https://img.shields.io/badge/checks-39%20(17%20active%20%2F%2016%20passive%20%2F%206%20probe)-informational)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
 ---
@@ -23,17 +23,22 @@ and reports.
 - **Intercepting proxy** — mitmproxy-based local proxy writes method, URL, headers, body
   and response preview into a per-project SQLite database. One click starts the proxy and
   a preconfigured Chromium/Burp Browser (PAC + certificate bypass for the isolated profile).
+  The proxy never starts by itself: it is started explicitly with **▶ Start Proxy + Browser**
+  (auto-start is available in Settings, off by default). Background browser noise — Google
+  telemetry, component updates, safe-browsing and connectivity checks — is filtered out of
+  History by default (`proxy_filter_noise` in Settings).
 - **Mutation scan engine** — builds tasks from captured requests over query parameters,
   `application/x-www-form-urlencoded` bodies, JSON bodies and (optionally) headers.
   Async engine (`asyncio` + `httpx.AsyncClient`) with configurable concurrency, RPS limit
   and scope guard; redirects are **never followed** (a payload-controlled redirect must not
   turn a scan into an outbound request).
-- **WSTG check catalog (38 checks)** — a single catalog (`checks/catalog.py`) drives the GUI
+- **WSTG check catalog (39 checks)** — a single catalog (`checks/catalog.py`) drives the GUI
   Checks/WSTG tab, the scan-config badges, the WSTG map of findings and payload files:
-  **16 active + 16 passive + 6 probe**. WSTG IDs are aligned with OWASP WSTG v4.2 and the
+  **17 active + 16 passive + 6 probe**. WSTG IDs are aligned with OWASP WSTG v4.2 and the
   v5 checklist (tests missing from v4.2 are marked `(v5)`). Full table:
   [`docs/CHECKS.md`](docs/CHECKS.md).
-  - Active: SQLi (error-based + time-based blind), CMDi, SSTI, LDAP/XPath/NoSQL injection,
+  - Active: SQLi (error-based, time-based blind and boolean-based blind with response
+    status/body differentials), CMDi, SSTI, LDAP/XPath/NoSQL injection,
     XXE, insecure deserialization, CRLF/header injection, SSRF, SSI injection,
     path traversal, reflected XSS, HTML injection, open redirect.
   - Passive: sensitive info disclosure, outdated JS libs, missing SRI, security headers,
@@ -56,7 +61,8 @@ and reports.
   (baseline / benign / suspicious replay), paginated results.
 - **Reports** — Markdown, JSON, HTML, SARIF, DOCX; the full result set is exported by
   default (no silent truncation).
-- **Payload sets** — ~3.2k payloads across 18 sets (SQLi, XSS, SSTI, SSRF, XXE, NoSQLi,
+- **Payload sets** — ~3.3k payloads across 19 sets (SQLi incl. boolean-blind true/false
+  pairs, XSS, SSTI, SSRF, XXE, NoSQLi,
   LDAP, XPath, CRLF, CMDi, path traversal, open redirect, file upload, IDOR,
   deserialization, SSI, HTML injection, time-based SQLi). Safe Mode filters destructive
   payloads. See [`payloads/README.md`](payloads/README.md).
@@ -85,10 +91,11 @@ mitmproxy, httpx, ttkbootstrap, python-docx. Details and troubleshooting:
 python notscan.py
 ```
 
-1. The proxy starts automatically on `127.0.0.1:8080` (if the port is busy, the next free
-   port is chosen automatically — check the status label).
-2. Click **▶ Start Proxy + Browser** to launch an isolated Chromium with the proxy already
-   configured, then browse the target application and exercise its features.
+1. Press **▶ Start Proxy + Browser**: the proxy starts on `127.0.0.1:8080` (if the port is
+   busy, the next free port is chosen automatically — check the status label) and an isolated
+   Chromium opens with the proxy already configured. The proxy does **not** start on its own;
+   auto-start is an opt-in setting in Settings.
+2. Browse the target application and exercise its features.
 3. In the **History** tab select the requests of interest (double-click also adds them),
    press **＋ Add to Scan list**, then **▶ Run Scan**.
 4. In the scan-config window pick checks (active / passive / probe), mutation points and
@@ -117,7 +124,7 @@ make smoke    # headless GUI smoke test in xvfb on a temp copy of the project
 The repository ships a self-contained HTTP lab (`tests/lab/`) with intentionally vulnerable
 endpoints (reflected XSS, escaped reflection, SQL errors, redirects, delayed responses,
 CSRF-protected form, JSON API, cookie/CORS/SSRF/SSI cases, sensitive files/metafiles) used
-by 339 unit and integration tests. Proxy-lifecycle integration tests are skipped
+by 369 unit and integration tests. Proxy-lifecycle integration tests are skipped
 automatically when mitmproxy or a display is unavailable.
 
 ## Project structure

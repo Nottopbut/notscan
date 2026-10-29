@@ -736,6 +736,23 @@ def clear_history() -> int:
         return cur.rowcount
 
 
+def delete_history_ids(ids: list[int]) -> int:
+    """Удаляет записи history по списку id. Возвращает кол-во удалённых строк."""
+    ids = [int(i) for i in (ids or []) if i is not None]
+    if not ids:
+        return 0
+    deleted = 0
+    with get_conn() as conn:
+        for chunk_start in range(0, len(ids), 500):
+            chunk = ids[chunk_start:chunk_start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            cur = conn.execute(
+                f"DELETE FROM history WHERE id IN ({placeholders})", chunk
+            )
+            deleted += cur.rowcount or 0
+    return deleted
+
+
 def clear_scan_results() -> int:
     """
     Удаляет все результаты сканирования и связанные данные.

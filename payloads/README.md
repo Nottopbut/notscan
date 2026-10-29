@@ -9,6 +9,7 @@ payloads inserted into query parameters.
 |---|---:|---|---|
 | `sqli.txt` | 666 | `sqli` | Error-based SQL injection (multi-DBMS error signatures are matched by the check). |
 | `sqli_time.txt` | 143 | `sqli_time` | Time-based blind SQLi. Only payloads registered in `checks/injections.py::SQLI_TIME_PAYLOADS` are treated as delay probes (threshold 2–5 s); the rest are sent as generic mutations. |
+| `sqli_blind.txt` | 32 | `sqli_blind` | Boolean-based blind SQLi. Each line is a **pair** `true_payload ||| false_payload`; the engine sends both requests and flags a finding when the responses differ significantly (status/length/similarity) and the false response matches the baseline (boolean conditions only — no destructive statements). |
 | `xss.txt` | 164 | `xss_reflected` | Reflected XSS vectors (tag/attribute breakouts, event handlers, polyglots). |
 | `cmdi.txt` | 543 | `cmdi` | OS command injection (`;`, `|`, `&&`, `$()`, `%0a`, Windows/PowerShell variants). |
 | `ssti.txt` | 139 | `ssti` | Server-side template injection (Jinja2, Twig, Freemarker, Velocity, Smarty, ERB, …). |
@@ -26,7 +27,7 @@ payloads inserted into query parameters.
 | `ssi.txt` | 20 | `ssi_injection` | Server-Side Includes directives (`#echo`, `#exec`, `#include`, `#printenv`, …). |
 | `deserialization.txt` | 16 | `deserialization` | Java (ysoserial-style), PHP, Python pickle, .NET, Node.js payload markers. |
 
-Total: **3266 payloads** across 18 sets. Sets are intentionally curated (deduplicated, one
+Total: **3298 payloads** across 19 sets. Sets are intentionally curated (deduplicated, one
 vector per line) rather than bulk copies; extra payloads can be added freely by appending
 lines to the corresponding file — the loader picks them up automatically.
 
@@ -46,6 +47,8 @@ reverse shells — they are only HTTP request payloads.
    `checks/injections.py::SQLI_TIME_PAYLOADS` with its expected delay so detection knows
    the threshold.
 4. Run `python -m pytest tests/test_payloads_quality.py tests/test_hardening.py -q`.
+5. Boolean-blind pairs (`sqli_blind.txt`) must keep the `true ||| false` format and stay
+   non-destructive: both halves are injected as-is into the vulnerable parameter.
 
 Sources: [PayloadsAllTheThings](https://github.com/swisskyrepo/PayloadsAllTheThings),
 OWASP WSTG test descriptions, PortSwigger Web Security Academy, HackTricks, vendor docs.

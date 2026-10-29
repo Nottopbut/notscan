@@ -2,7 +2,7 @@
 tests/test_integration_wstg.py — QA волна 2: интеграция новых WSTG-чеков.
 
 Проверяется на локальной лабе (`tests/lab/`) и в headless-xvfb:
-  • каталог `checks/catalog.py` (38 чеков) ↔ payload-файлы ↔ GUI Checks/WSTG;
+  • каталог `checks/catalog.py` (39 чеков) ↔ payload-файлы ↔ GUI Checks/WSTG;
   • новые active-чеки (ssi_injection, html_injection) через реальный движок
     (`build_scan_tasks → ScannerRunner → scan_results`) — TP на уязвимых
     эндпоинтах и **0 FP** на /search (html.escape) и /safe;
@@ -272,137 +272,22 @@ def _bindable(port: int, host: str = "127.0.0.1") -> bool:
         sock.close()
 
 
-_AUTOSTART_SCRIPT = r"""
-import json, socket, sys, time
-sys.path.insert(0, ".")
-import notscan
-
-
-def _bindable(port, host="127.0.0.1"):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1.0)
-    try:
-        s.bind((host, port))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
-
-
-app = notscan.App()
-state = {"deadline": time.time() + 15.0}
-
-
-def _probe():
-    runner = getattr(app, "_proxy_runner", None)
-    running = bool(runner is not None and runner.is_running)
-    port = int(getattr(app, "_proxy_confirmed_port", 0) or 0)
-    if running and port and not _bindable(port):
-        state.update(
-            auto_started=True,
-            port=port,
-            status=app._proxy_status_lbl.cget("text"),
-            busy_while_running=True,
-        )
-        app._on_closing()
-        return
-    if time.time() >= state["deadline"]:
-        state.update(
-            auto_started=False,
-            port=port,
-            status=app._proxy_status_lbl.cget("text"),
-        )
-        app._on_closing()
-        return
-    app.after(200, _probe)
-
-
-app.after(400, _probe)
-app.mainloop()
-port = int(state.get("port") or 0)
-state["bindable_after_close"] = bool(port) and _bindable(port)
-print("RESULT_JSON " + json.dumps(state))
-"""
-
-
-_BUSY_PORT_SCRIPT = r"""
-import json, socket, sys, time
-sys.path.insert(0, ".")
-import notscan
-
-
-blocker = None
-# Гарантируем «занятый 8080»: предыдущие прокси-тесты могли ещё не отпустить порт.
-for _attempt in range(100):
-    candidate = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        candidate.bind(("127.0.0.1", 8080))
-        candidate.listen(1)
-        blocker = candidate
-        break
-    except OSError:
-        try:
-            candidate.close()
-        except OSError:
-            pass
-        time.sleep(0.05)
-
-app = notscan.App()
-state = {"deadline": time.time() + 15.0}
-
-
-def _probe():
-    runner = getattr(app, "_proxy_runner", None)
-    running = bool(runner is not None and runner.is_running)
-    port = int(getattr(app, "_proxy_confirmed_port", 0) or 0)
-    if running and port:
-        try:
-            ui_port = int(app._proxy_port.get())
-        except Exception:
-            ui_port = -1
-        state.update(
-            auto_started=True,
-            port=port,
-            ui_port=ui_port,
-            fallback_applied=bool(port > 8080 and ui_port == port),
-            status=app._proxy_status_lbl.cget("text"),
-            blocker_was_none=blocker is None,
-        )
-        app._on_closing()
-        return
-    if time.time() >= state["deadline"]:
-        state.update(auto_started=False, status=app._proxy_status_lbl.cget("text"))
-        app._on_closing()
-        return
-    app.after(200, _probe)
-
-
-app.after(400, _probe)
-app.mainloop()
-if blocker is not None:
-    blocker.close()
-print("RESULT_JSON " + json.dumps(state))
-"""
-
-
 # ══════════════════════════════════════════════════════════════════
 #  1. Каталог ↔ payload-файлы ↔ matchers
 # ══════════════════════════════════════════════════════════════════
 
 
 def test_catalog_complete_with_payload_files_and_matchers():
-    """38 чеков: уникальные id, active с payload-файлами, matcher'ы новых чеков."""
+    """39 чеков: уникальные id, active с payload-файлами, matcher'ы новых чеков."""
     import checks.catalog as catalog
 
     defs = list(catalog.CHECK_CATALOG)
-    assert len(defs) == 38, f"ожидалось 38 чеков, в каталоге {len(defs)}"
+    assert len(defs) == 39, f"ожидалось 39 чеков, в каталоге {len(defs)}"
     ids = [d.check_id for d in defs]
     assert len(set(ids)) == len(ids), "дубли check_id в каталоге"
 
     kinds = collections.Counter(d.kind for d in defs)
-    assert kinds["active"] == 16 and kinds["passive"] == 16 and kinds["probe"] == 6, kinds
+    assert kinds["active"] == 17 and kinds["passive"] == 16 and kinds["probe"] == 6, kinds
 
     # Все active-чеки имеют payload-файл, который реально грузится.
     active_payloads: dict[str, list[str]] = {}
@@ -640,7 +525,7 @@ def test_gui_checks_tree_and_badges_match_catalog(tmp_path):
     data = _run_gui_script(project, _CATALOG_SCRIPT)
 
     assert data["uses_catalog"] is True, "GUI не использует checks/catalog.py"
-    assert data["catalog_count"] == len(catalog.CHECK_CATALOG) == 38
+    assert data["catalog_count"] == len(catalog.CHECK_CATALOG) == 39
     assert data["tree_ids"] == data["catalog_ids"], (
         f"строк GUI {len(data['tree_ids'])} != чеков каталога {len(data['catalog_ids'])}"
     )
@@ -650,7 +535,7 @@ def test_gui_checks_tree_and_badges_match_catalog(tmp_path):
     assert data["passive_helper"] == data["passive_ids"]
     assert data["probe_helper"] == data["probe_ids"]
     assert "info_disclosure_paths" in data["probe_ids"]
-    assert "38" in data["summary"], data["summary"]
+    assert "39" in data["summary"], data["summary"]
 
     # Кнопки Stop Proxy больше нет; Stop Scan — остаётся.
     assert data["has_stop_proxy"] is False, (
@@ -662,39 +547,10 @@ def test_gui_checks_tree_and_badges_match_catalog(tmp_path):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  6. Авто-жизненный цикл прокси (xvfb acceptance)
+#  6. GUI-прокси lifecycle
 # ══════════════════════════════════════════════════════════════════
-
-
-def test_gui_proxy_autostart_and_port_release(tmp_path):
-    """App авто-стартует прокси; после закрытия порт снова bindable."""
-    project = _copy_project(tmp_path)
-    data = _run_gui_script(
-        project, _AUTOSTART_SCRIPT, disable_proxy_autostart=False, timeout=240
-    )
-    if not data.get("auto_started"):
-        pytest.skip(f"mitmproxy не поднялся в окружении: {data}")
-    assert data["port"] > 0
-    assert data["status"].startswith("● RUNNING"), data["status"]
-    assert data["busy_while_running"] is True, "прокси RUNNING, но порт не занят"
-    assert data["bindable_after_close"] is True, (
-        "после закрытия App порт прокси не освобождён"
-    )
-
-
-def test_gui_proxy_busy_port_fallback(tmp_path):
-    """Занятый 8080 → авто-подбор следующего свободного порта."""
-    project = _copy_project(tmp_path)
-    data = _run_gui_script(
-        project, _BUSY_PORT_SCRIPT, disable_proxy_autostart=False, timeout=240
-    )
-    if not data.get("auto_started"):
-        pytest.skip(f"mitmproxy не поднялся в окружении: {data}")
-    assert data["fallback_applied"] is True, (
-        f"8080 занят, fallback не сработал: {data}"
-    )
-    assert data["port"] > 8080
-    assert data["ui_port"] == data["port"], "поле Port в UI не обновлено"
+# Покрыто в tests/test_gui_catalog.py: прокси не стартует сам, старт по кнопке,
+# смена порта, fallback при занятом порте, освобождение порта при закрытии.
 
 
 def test_proxy_lifecycle_helpers_acceptance():
@@ -724,13 +580,14 @@ def test_proxy_lifecycle_helpers_acceptance():
 
     # Настройки авто-прокси: дефолты и нормализация.
     defaults = mitm_proxy.proxy_settings({})
-    assert defaults["proxy_autostart"] is True
+    assert defaults["proxy_autostart"] is False, "прокси не должен авто-стартовать"
     assert defaults["proxy_stop_on_browser_exit"] is True
     assert defaults["proxy_idle_stop_min"] == 15
+    assert defaults["proxy_filter_noise"] is True
     tuned = mitm_proxy.proxy_settings(
-        {"proxy_autostart": False, "proxy_idle_stop_min": -3, "junk": "x"}
+        {"proxy_autostart": True, "proxy_idle_stop_min": -3, "junk": "x"}
     )
-    assert tuned["proxy_autostart"] is False
+    assert tuned["proxy_autostart"] is True
     assert tuned["proxy_idle_stop_min"] == 0.0
 
     # ProxyRunner отдаёт активность для idle-автостопа.

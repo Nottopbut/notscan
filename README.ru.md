@@ -18,16 +18,21 @@
 - **Перехват трафика** — локальный прокси на базе mitmproxy пишет метод, URL, заголовки,
   тело запроса и превью ответа в SQLite-базу проекта. Одна кнопка запускает прокси и
   преднастроенный браузер (PAC-скрипт + изолированный профиль с обходом сертификатов).
+  Сам прокси не запускается: только по кнопке **▶ Start Proxy + Browser** (авто-старт —
+  опция в Settings, по умолчанию выключена). Фоновый шум браузера (телеметрия Google,
+  обновления компонентов, safe-browsing, connectivity-check) по умолчанию не пишется
+  в History (`proxy_filter_noise` в Settings).
 - **Мутационный скан** — задачи строятся по query-параметрам, form-urlencoded телам,
   JSON-телам и (опционально) заголовкам. Асинхронный движок (`asyncio` + `httpx.AsyncClient`),
   настраиваемая конкурентность, RPS-лимит, scope-guard; редиректы **не сопровождаются**
   (payload-редирект не должен превращать сканер в источник внешних запросов).
-- **Каталог WSTG-чеков (38)** — единый источник (`checks/catalog.py`) для вкладки
+- **Каталог WSTG-чеков (39)** — единый источник (`checks/catalog.py`) для вкладки
   Checks/WSTG, бейджей конфигурации скана, WSTG-карты находок и payload-файлов:
-  **16 active + 16 passive + 6 probe**. WSTG-ID сверены с OWASP WSTG v4.2 и checklist v5
+  **17 active + 16 passive + 6 probe**. WSTG-ID сверены с OWASP WSTG v4.2 и checklist v5
   (тесты, которых нет в v4.2, помечены `(v5)`). Полная таблица —
   [`docs/CHECKS.md`](docs/CHECKS.md).
-  - Active: SQLi (error/time-based), CMDi, SSTI, LDAP/XPath/NoSQL, XXE, deserialization,
+  - Active: SQLi (error-based, time-based и boolean-based blind по разнице кодов/тел
+    ответов), CMDi, SSTI, LDAP/XPath/NoSQL, XXE, deserialization,
     CRLF, SSRF, SSI, path traversal, reflected XSS, HTML injection, open redirect.
   - Passive: info disclosure, устаревшие JS-библиотеки, SRI, security headers, HSTS, CSP,
     атрибуты cookie, кэширование чувствительных ответов, креды по открытому каналу,
@@ -48,7 +53,8 @@
   (baseline / benign / suspicious replay), пагинация результатов.
 - **Отчёты** — Markdown, JSON, HTML, SARIF, DOCX; по умолчанию выгружается полный набор
   результатов (без молчаливой обрезки).
-- **Payload-наборы** — ~3.2 тыс. payload'ов в 18 наборах; Safe Mode фильтрует
+- **Payload-наборы** — ~3.3 тыс. payload'ов в 19 наборах (включая true/false пары для
+  boolean-blind SQLi); Safe Mode фильтрует
   деструктивные. См. [`payloads/README.md`](payloads/README.md).
 - **Проекты** — каждый запуск работает в своём каталоге проекта со своей БД, настройками
   и отчётами; переключение — **Project → Sessions / Projects…**. Смена проекта блокируется
@@ -75,10 +81,11 @@ mitmproxy, httpx, ttkbootstrap, python-docx. Подробности и troublesh
 python notscan.py
 ```
 
-1. Прокси стартует автоматически на `127.0.0.1:8080` (если порт занят — автоматически
-   выбирается следующий свободный; смотри статус-лейбл).
-2. Нажми **▶ Start Proxy + Browser** — откроется изолированный Chromium с уже настроенным
-   прокси; пройди по функционалу целевого приложения.
+1. Нажми **▶ Start Proxy + Browser** — прокси стартует на `127.0.0.1:8080` (если порт
+   занят — автоматически выбирается следующий свободный; смотри статус-лейбл) и
+   открывается изолированный Chromium с уже настроенным прокси. Сам прокси не
+   запускается: авто-старт — опция в Settings (по умолчанию выключена).
+2. Пройди по функционалу целевого приложения.
 3. Во вкладке **History** выдели нужные запросы (двойной клик тоже добавляет),
    нажми **＋ Add to Scan list**, затем **▶ Run Scan**.
 4. В окне конфигурации выбери чеки (active/passive/probe), точки мутации и ROE-опции
@@ -107,7 +114,7 @@ make smoke    # headless GUI-смоук в xvfb на временной копи
 В репозитории есть самодостаточная HTTP-лаба (`tests/lab/`) с намеренно уязвимыми
 эндпоинтами (reflected XSS, escaped reflection, SQL-ошибки, редиректы, задержки,
 CSRF-форма, JSON API, cookie/CORS/SSRF/SSI-кейсы, чувствительные файлы/metafiles) —
-её используют 339 unit- и интеграционных тестов. Интеграционные тесты прокси
+её используют 369 unit- и интеграционных тестов. Интеграционные тесты прокси
 пропускаются автоматически, если mitmproxy или дисплей недоступны.
 
 ## Структура проекта

@@ -381,5 +381,37 @@ class TestSqliTimeExport(_DbTestCase):
                 os.remove(f)
 
 
+class TestDeleteHistoryIds(unittest.TestCase):
+    """Очистка History по id (кнопка «Clear browser noise»)."""
+
+    def setUp(self):
+        self._db = tempfile.mktemp(suffix=".db")
+        db.set_db_path(self._db)
+
+    def tearDown(self):
+        if os.path.exists(self._db):
+            os.remove(self._db)
+
+    def _insert(self, url: str) -> int:
+        return db.insert_history(
+            method="GET", url=url, req_headers={}, req_body=None,
+            resp_status=200, resp_headers={}, resp_body_preview=b"",
+        )
+
+    def test_delete_subset_keeps_other_rows(self):
+        ids = [self._insert(f"http://x/{i}") for i in range(5)]
+        deleted = db.delete_history_ids([ids[1], ids[3]])
+        self.assertEqual(deleted, 2)
+        remaining = {r["id"] for r in db.fetch_history(limit=100)}
+        self.assertEqual(remaining, {ids[0], ids[2], ids[4]})
+
+    def test_empty_unknown_and_all(self):
+        self.assertEqual(db.delete_history_ids([]), 0)
+        self.assertEqual(db.delete_history_ids([999999]), 0)
+        i = self._insert("http://x/a")
+        self.assertEqual(db.delete_history_ids([i]), 1)
+        self.assertEqual(db.fetch_history(limit=100), [])
+
+
 if __name__ == "__main__":
     unittest.main()

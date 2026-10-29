@@ -66,6 +66,21 @@ SQL_ERROR_TEXT = (
 #: Маркеры time-based payload'ов — при их наличии /sleep реально спит.
 SLEEP_PAYLOAD_MARKERS = ("sleep(", "pg_sleep", "waitfor", "randomblob")
 
+#: Boolean-blind SQLi (/blind): FALSE-маркеры проверяются ПЕРВЫМИ, т.к. false-
+#: payload может содержать и true-токен (пример: "1 AND 1=1 AND 2=3").
+BLIND_FALSE_MARKERS = (
+    "1=2", "2=3",
+    "'1'='2", '"1"="2', "='b'", "like 'b'", "in (2)",
+    "between 2 and 3", "ascii('a')=66", "length('abc')=4", "='other'",
+    "('a'='b')", "cast(2", "is null", "=(select 2", "1)=2", "or 1=2",
+)
+BLIND_TRUE_MARKERS = (
+    "1=1", "2=2",
+    "'1'='1", '"1"="1', "='a'", "like 'a'", "in (1)",
+    "between 1 and 1", "ascii('a')=65", "length('abc')=3", "='notscan'",
+    "('a'='a')", "cast(1", "is not null", "=(select 1", "1)=1", "or 1=1",
+)
+
 _HTML_HEAD = "<html><head><title>{title}</title></head><body>"
 _HTML_TAIL = "</body></html>"
 
@@ -403,6 +418,34 @@ class _LabHandler(BaseHTTPRequestHandler):
                     200,
                     text=_HTML_HEAD.format(title="Item") + f"Item id: {html.escape(param)}" + _HTML_TAIL,
                 )
+        elif path == "/blind":
+            # Эмуляция boolean-based blind SQLi (см. FIX_CONTRACT round2/task-14):
+            #   id=1               → 200 "User: admin"           (baseline)
+            #   ... 1=1 / '1'='1   → 200 "User found: admin"     (TRUE)
+            #   ... 1=2 / '1'='2   → 404 "User not found"        (FALSE)
+            param = _first(query, "id")
+            lowered = (param or "").lower()
+            if any(marker in lowered for marker in BLIND_FALSE_MARKERS):
+                self._finish(
+                    404,
+                    text=_HTML_HEAD.format(title="User")
+                    + "<h1>User not found</h1>"
+                    + _HTML_TAIL,
+                )
+            elif any(marker in lowered for marker in BLIND_TRUE_MARKERS):
+                self._finish(
+                    200,
+                    text=_HTML_HEAD.format(title="User")
+                    + "<h1>User found: admin</h1>"
+                    + _HTML_TAIL,
+                )
+            else:
+                self._finish(
+                    200,
+                    text=_HTML_HEAD.format(title="User")
+                    + "<h1>User: admin</h1>"
+                    + _HTML_TAIL,
+                )
         elif path == "/redirect":
             target = _first(query, "url", "/safe")
             self._finish(302, text="", extra_headers={"Location": target})
@@ -533,7 +576,7 @@ class _LabHandler(BaseHTTPRequestHandler):
                 text=(
                     _HTML_HEAD.format(title="NotScan lab")
                     + "<h1>NotScan test lab</h1>"
-                    + '<p>Endpoints: /reflect /search /sqli /redirect /sleep /slow /safe /form /api/user</p>'
+                    + '<p>Endpoints: /reflect /search /sqli /blind /redirect /sleep /slow /safe /form /api/user</p>'
                     + _HTML_TAIL
                 ),
             )

@@ -78,10 +78,57 @@ _LOG_PATCHED = False
 # Хранятся в project settings (ui_theme.load_settings/save_settings).
 # См..
 
+# Фоновый «шум» браузера: телеметрия Chromium/Google, обновления компонентов,
+# safe-browsing, connectivity-check и т.п. Такие запросы не нужны в History и
+# только засоряют её (и могут случайно попасть в скан). Фильтруются на входе
+# в прокси (LoggerAddon), настройка — proxy_filter_noise (по умолчанию вкл.).
+NOISE_HOST_SUFFIXES: tuple[str, ...] = (
+    # Google / Chromium telemetry & updates
+    "accounts.google.com",
+    "update.googleapis.com",
+    "clients2.google.com",
+    "clientservices.googleapis.com",
+    "optimizationguide-pa.googleapis.com",
+    "safebrowsing.googleapis.com",
+    "chromewebstore.googleapis.com",
+    "play.googleapis.com",
+    "c2dm.googleapis.com",
+    "android.clients.google.com",
+    "mtalk.google.com",
+    "time.google.com",
+    "www.google.com",
+    "www.gstatic.com",
+    "fonts.googleapis.com",
+    "fonts.gstatic.com",
+    "ssl.gstatic.com",
+    "connectivitycheck.gstatic.com",
+    "google-analytics.com",
+    "googletagmanager.com",
+    "googlesyndication.com",
+    "doubleclick.net",
+    # Microsoft / Mozilla аналогичный фоновый шум
+    "settings-win.data.microsoft.com",
+    "v10.events.data.microsoft.com",
+    "self.events.data.microsoft.com",
+    "firefox.settings.services.mozilla.com",
+    "incoming.telemetry.mozilla.org",
+)
+
+
+def is_noise_host(host: str) -> bool:
+    """True, если хост — известный фоновый шум браузера (телеметрия/обновления)."""
+    host_l = (host or "").strip().lower().rstrip(".")
+    if not host_l:
+        return False
+    return any(host_l == suffix or host_l.endswith("." + suffix)
+               for suffix in NOISE_HOST_SUFFIXES)
+
+
 PROXY_SETTING_DEFAULTS: dict[str, Any] = {
-    "proxy_autostart": True,             # авто-старт прокси при запуске App
+    "proxy_autostart": False,            # авто-старт прокси при запуске App (по умолчанию ВЫКЛ)
     "proxy_stop_on_browser_exit": True,  # авто-стоп после закрытия браузера
     "proxy_idle_stop_min": 15,           # авто-стоп после N минут простоя (0 = off)
+    "proxy_filter_noise": True,          # не писать в History фоновый шум браузера
 }
 
 
@@ -281,13 +328,39 @@ class LoggerAddon:
         self,
         log_callback: Optional[Callable[[str], None]] = None,
         on_activity: Optional[Callable[[], None]] = None,
+        filter_noise: bool = True,
     ):
         self.log_cb = log_callback or (lambda s: None)
         # Колбэк «был перехвачен трафик» — нужен idle-автостопу ProxyRunner.
         self.on_activity = on_activity
+        self.filter_noise = bool(filter_noise)
+        self.filtered_noise_count = 0
+        self._noise_lock = threading.Lock()
+
+    def _is_noise(self, flow) -> bool:
+        if not self.filter_noise:
+            return False
+        try:
+            host = flow.request.host or ""
+        except Exception:
+            return False
+        if not is_noise_host(host):
+            return False
+        with self._noise_lock:
+            self.filtered_noise_count += 1
+            count = self.filtered_noise_count
+        # Логируем редко, чтобы не засорять лог.
+        if count == 1 or count % 25 == 0:
+            self.log_cb(
+                f"[PROXY] фоновый шум браузера отфильтрован: {host} "
+                f"(всего {count}; отключить — Settings → Proxy filter noise)"
+            )
+        return True
 
     def response(self, flow) -> None:  # type: ignore[override]
         try:
+            if self._is_noise(flow):
+                return
             if self.on_activity is not None:
                 try:
                     self.on_activity()
@@ -350,10 +423,12 @@ class ProxyRunner:
         host: str = "127.0.0.1",
         port: int = 8080,
         log_callback: Optional[Callable[[str], None]] = None,
+        filter_noise: bool = True,
     ):
         self.host = host
         self.port = port
         self.log_cb = log_callback or print
+        self.filter_noise = bool(filter_noise)
 
         # Python-API mode
         self._thread: Optional[threading.Thread] = None
@@ -588,7 +663,11 @@ class ProxyRunner:
         # Создаём DumpMaster здесь — loop уже running
         self._master = DumpMaster(opts, with_termlog=False, with_dumper=False)
         self._master.addons.add(
-            LoggerAddon(self.log_cb, on_activity=self._touch_activity)
+            LoggerAddon(
+                self.log_cb,
+                on_activity=self._touch_activity,
+                filter_noise=self.filter_noise,
+            )
         )
 
         self._touch_activity()

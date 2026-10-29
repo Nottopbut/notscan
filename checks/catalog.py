@@ -169,6 +169,14 @@ CHECK_CATALOG: tuple[CheckDef, ...] = (
         "active", "sqli_time.txt",
     ),
     CheckDef(
+        "sqli_blind", "WSTG-INPV-05", "SQL Injection (Boolean-Based Blind)",
+        "Injection", "HIGH", "CWE-89",
+        "WSTG-INPV-05 Testing for SQL Injection (blind): true/false boolean payload "
+        "pairs (AND 1=1 vs AND 1=2) compared by response status/length/similarity; "
+        "false response must match the baseline.",
+        "active", "sqli_blind.txt",
+    ),
+    CheckDef(
         "cmdi", "WSTG-INPV-12", "Command Injection (CMDi)",
         "Injection", "CRITICAL", "CWE-78",
         "WSTG-INPV-12 Testing for Command Injection: shell metacharacters executed "

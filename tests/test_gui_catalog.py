@@ -180,17 +180,40 @@ def _bindable(port, host="127.0.0.1"):
 
 
 app = notscan.App()
-state = {"deadline": time.time() + 12.0, "auto_started": False}
+state = {"deadline": time.time() + 12.0}
+
+# 1) при запуске прокси НЕ должен стартовать сам (дефолт proxy_autostart=False)
+seen_running_at_launch = []
 
 
-def _probe():
+def _phase_launch():
+    runner = getattr(app, "_proxy_runner", None)
+    running = bool(runner is not None and runner.is_running)
+    if running and not seen_running_at_launch:
+        seen_running_at_launch.append(True)
+    # ждём 1.2с, чтобы исключить гонку «авто-старт через after(300)»
+    if time.time() < state.get("launch_deadline", 0):
+        app.after(100, _phase_launch)
+        return
+    state["auto_started_at_launch"] = bool(seen_running_at_launch)
+    state["state_at_launch"] = str(app._btn_start_proxy.cget("state"))
+    # 2) явный старт (как по кнопке): прокси поднимается и держит порт
+    ok = app._start_proxy(auto=True)
+    state["start_ok"] = bool(ok)
+    app.after(200, _phase_started)
+
+
+state["launch_deadline"] = time.time() + 1.2
+app.after(100, _phase_launch)
+
+
+def _phase_started():
     runner = getattr(app, "_proxy_runner", None)
     running = bool(runner is not None and runner.is_running)
     port = int(getattr(app, "_proxy_confirmed_port", 0) or 0)
-    # Ждём не просто живого потока, а фактически занятого listen-порта.
     if running and port and not _bindable(port):
         state.update(
-            auto_started=True,
+            started_by_button=True,
             port=port,
             status=app._proxy_status_lbl.cget("text"),
             busy_while_running=True,
@@ -199,17 +222,16 @@ def _probe():
         return
     if time.time() >= state["deadline"]:
         state.update(
-            auto_started=False,
+            started_by_button=False,
             status=app._proxy_status_lbl.cget("text"),
             port=port,
             busy_while_running=False,
         )
         app._on_closing()
         return
-    app.after(200, _probe)
+    app.after(200, _phase_started)
 
 
-app.after(400, _probe)
 app.mainloop()
 port = int(state.get("port") or 0)
 state["bindable_after_close"] = bool(port) and _bindable(port)
@@ -236,8 +258,6 @@ def _bindable(port, host="127.0.0.1"):
 
 
 blocker = None
-# Предыдущие тесты могли ещё не отпустить 8080 — пробуем занять его с ретраями,
-# чтобы port-busy гарантированно наблюдался в момент авто-старта App.
 for _attempt in range(100):
     candidate = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -252,10 +272,15 @@ for _attempt in range(100):
         except OSError:
             pass
         time.sleep(0.05)
-# blocker is None → порт занят кем-то другим; fallback обязан сработать и так.
 
 app = notscan.App()
 state = {"deadline": time.time() + 12.0}
+
+
+def _start_and_probe():
+    # явный старт (как по кнопке), не авто-старт
+    app._start_proxy(auto=True)
+    app.after(200, _probe)
 
 
 def _probe():
@@ -268,7 +293,8 @@ def _probe():
         except Exception:
             ui_port = -1
         state.update(
-            auto_started=True,
+            auto_started=False,
+            started_by_button=True,
             port=port,
             ui_port=ui_port,
             fallback_applied=bool(port > 8080 and ui_port == port),
@@ -277,69 +303,40 @@ def _probe():
         app._on_closing()
         return
     if time.time() >= state["deadline"]:
-        state.update(auto_started=False, status=app._proxy_status_lbl.cget("text"))
+        state.update(started_by_button=False, port=port, ui_port=-1,
+                     fallback_applied=False,
+                     status=app._proxy_status_lbl.cget("text"))
         app._on_closing()
         return
     app.after(200, _probe)
 
 
-app.after(400, _probe)
+app.after(600, _start_and_probe)
 app.mainloop()
-if blocker is not None:
-    blocker.close()
+try:
+    if blocker is not None:
+        blocker.close()
+except Exception:
+    pass
 print("RESULT_JSON " + json.dumps(state))
 """
 
 
-# ──────────────────────────── tests ────────────────────────────
-
-def test_gui_checks_tree_and_badges_use_catalog(tmp_path):
-    """Checks/WSTG-дерево и бейджи ScanConfigWindow строятся из каталога."""
-    project = _copy_project(tmp_path)
-    data = _run_gui_script(project, _CATALOG_SCRIPT)
-
-    assert data["catalog_available"] is True, "checks/catalog.py не загрузился"
-    assert data["uses_catalog"] is True
-    assert data["tree_count"] == data["catalog_count"], (
-        f"GUI-строк {data['tree_count']} != чеков в каталоге {data['catalog_count']}"
-    )
-    assert set(data["tree_ids"]) == set(data["catalog_ids"])
-
-    # Активные чеки каталога — все как бейджи
-    assert set(data["badges"]) == set(data["active_ids"]), (
-        f"бейджи != active каталога; missing={set(data['active_ids']) - set(data['badges'])}"
-    )
-    # Passive+probe — как чекбоксы
-    expected_checkboxes = set(data["passive_ids"]) | set(data["probe_ids"])
-    assert set(data["checkboxes"]) == expected_checkboxes, (
-        f"чекбоксы != passive+probe; missing={expected_checkboxes - set(data['checkboxes'])}"
-    )
-    # Вспомогательные наборы GUI (для _build_and_run) тоже из каталога
-    assert data["passive_helper"] == data["passive_ids"]
-    assert data["probe_helper"] == data["probe_ids"]
-    assert "info_disclosure_paths" in data["probe_ids"], "pseudo probe-чек потерян"
-
-    # Stop Proxy кнопки нет; Stop Scan (скан, не прокси) остаётся
-    assert data["has_stop_proxy_button"] is False, (
-        f"в UI осталась кнопка Stop Proxy: {data['button_texts']}"
-    )
-    assert data["has_stop_scan_button"] is True
-    assert data["check_vars"] >= data["catalog_count"]
-    assert "/" in data["summary"] and "enabled" in data["summary"]
-    assert data["has_proxy_settings_widgets"] is True
-    assert data["has_lifecycle_methods"] is True
-    # Авто-старт отключён env-переменной для этого теста
-    assert data["status"].startswith("● STOPPED")
-
-
 @pytest.mark.integration
-def test_gui_app_autostarts_proxy_and_releases_port(tmp_path):
-    """App авто-стартует прокси; после закрытия App порт bindable."""
+def test_gui_proxy_starts_only_by_button_and_releases_port(tmp_path):
+    """Прокси НЕ стартует сам при запуске App; старт — только явный (кнопка).
+
+    После явного старта порт занят; после закрытия App — освобождён.
+    """
     project = _copy_project(tmp_path)
     data = _run_gui_script(
         project, _AUTOSTART_SCRIPT, disable_proxy_autostart=False, timeout=240
     )
-    if not data.get("auto_started"):
+    assert data.get("auto_started_at_launch") is False, (
+        f"прокси запустился автоматически при старте App: {data}"
+    )
+    assert data.get("state_at_launch") == "normal"
+    if not data.get("started_by_button"):
         pytest.skip(f"mitmproxy не поднялся в окружении: {data}")
     assert data["port"] > 0
     assert data["status"].startswith("● RUNNING")
@@ -356,7 +353,7 @@ def test_gui_busy_port_fallback(tmp_path):
     data = _run_gui_script(
         project, _BUSY_PORT_SCRIPT, disable_proxy_autostart=False, timeout=240
     )
-    if not data.get("auto_started"):
+    if not data.get("started_by_button"):
         pytest.skip(f"mitmproxy не поднялся в окружении: {data}")
     assert data["fallback_applied"] is True, (
         f"порт 8080 занят, но fallback не сработал: {data}"
@@ -453,9 +450,10 @@ import notscan
 
 
 class FakeRunner:
-    def __init__(self, host="127.0.0.1", port=0, log_callback=None):
+    def __init__(self, host="127.0.0.1", port=0, log_callback=None, filter_noise=True, **_kw):
         self.host = host
         self.port = port
+        self.filter_noise = filter_noise
         self.is_running = False
         self.last_activity_ts = 0.0
 

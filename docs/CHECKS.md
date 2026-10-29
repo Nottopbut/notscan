@@ -1,6 +1,6 @@
 # WSTG check catalog
 
-`notscan` ships **38 checks**: 16 active (mutation-based), 16 passive (response analysis)
+`notscan` ships **39 checks**: 17 active (mutation-based), 16 passive (response analysis)
 and 6 probe (dedicated HTTP requests). The catalog lives in [`checks/catalog.py`](../checks/catalog.py)
 and is the single source of truth for the GUI (Checks/WSTG tab, scan-config badges), the
 WSTG mapping of findings (`checks/runner.py::WSTG_ID_MAP`) and payload files
@@ -12,7 +12,7 @@ the v5 checklist with an explicit `(v5)` marker. For vulnerability classes witho
 dedicated WSTG test (e.g. NoSQL injection) the closest WSTG test is referenced and noted in
 the check description.
 
-## Active checks (16)
+## Active checks (17)
 
 Mutation-based checks: payloads are injected into captured requests and the response is
 analyzed (signatures, reflection with context checks, delay measurement).
@@ -21,6 +21,7 @@ analyzed (signatures, reflection with context checks, delay measurement).
 |---|---|---|---|---|
 | `sqli` | WSTG-INPV-05 | HIGH | CWE-89 | SQL Injection (error-based) |
 | `sqli_time` | WSTG-INPV-05 | HIGH | CWE-89 | SQL Injection (time-based blind) — delay relative to host baseline |
+| `sqli_blind` | WSTG-INPV-05 | HIGH | CWE-89 | SQL Injection (boolean-based blind) — true/false payload pairs compared by status/length/similarity, false must match baseline |
 | `cmdi` | WSTG-INPV-12 | CRITICAL | CWE-78 | Command Injection |
 | `ssti` | WSTG-INPV-18 | CRITICAL | CWE-94 | Server-Side Template Injection |
 | `ldap_injection` | WSTG-INPV-06 | HIGH | CWE-90 | LDAP Injection |
@@ -77,6 +78,10 @@ Dedicated requests issued against the target base URL (no mutation of captured r
 - **Active checks** require payload files under `payloads/` (see
   [`payloads/README.md`](../payloads/README.md)); missing files are reported in the log and
   the check is skipped.
+- **sqli_blind** uses paired payloads (`payloads/sqli_blind.txt`, one pair per line:
+  `true_payload ||| false_payload`): the engine sends both requests (same endpoint/headers,
+  only the payload differs) and treats a significant status/length/similarity difference as
+  a finding only when the other response matches the baseline (no baseline → status-diff only).
 - **Safe Mode** filters destructive payloads before task generation
   (`DESTRUCTIVE_PAYLOAD_PATTERNS` in `scanner_core.py`).
 - **Tamper/WAF-bypass** encoders (`url`, `unicode`, `hex`, `double-url`) apply only to

@@ -70,8 +70,8 @@ inferred-контрактов: int/url/json/email/…).
 1. **Matcher-слой** (`scanner_core.match_*`) — быстрые сигнатурные проверки
    (SQL-ошибки, отражение XSS с контекстными правилами, заголовки CRLF, Location и т.д.),
    с baseline-suppress: если сигнал есть и в baseline-ответе, он подавляется.
-2. **Checks-пайплайн** (`checks/`) — 38 чеков из каталога:
-   - **active** (16): payload-проверки (SQLi error/time, CMDi, SSTI, LDAP/XPath/NoSQL,
+2. **Checks-пайплайн** (`checks/`) — 39 чеков из каталога:
+   - **active** (17): payload-проверки (SQLi error/time/blind, CMDi, SSTI, LDAP/XPath/NoSQL,
      XXE, deserialization, CRLF, SSRF, SSI, path traversal, reflected XSS, HTML injection,
      open redirect);
    - **passive** (16): анализ ответов (info disclosure, headers/HSTS/CSP, cookies,

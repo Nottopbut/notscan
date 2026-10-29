@@ -160,6 +160,34 @@ class SQLiTimeCheck(BaseCheck):
         return self.ok()
 
 
+class SQLiBlindCheck(BaseCheck):
+    """
+    Boolean-based blind SQLi — детекция выполняется ДВИЖКОМ (парные запросы).
+
+    Движок (scanner_core) для каждой пары payload'ов `true_payload ||| false_payload`
+    отправляет два запроса и сравнивает ответы: статус/длину/similarity, а также
+    похожесть false-ответа на baseline (history). Класс нужен для консистентности
+    каталог ↔ registry ↔ WSTG-карты (checks/runner.WSTG_ID_MAP строится из каталога),
+    сам по себе находок не создаёт.
+    """
+    check_id = "sqli_blind"
+    vuln_type = "sqli_blind"
+    category = VulnCategory.INJECTION_SERVER
+    severity = Severity.HIGH
+    name = "SQL Injection (Boolean-Based Blind)"
+    cwe = "CWE-89"
+    description = (
+        "Boolean-based blind SQL injection: true/false payload pairs are compared by "
+        "response status/length/similarity; false response must match baseline."
+    )
+
+    def check(self, req: ScanRequest, resp: ScanResponse, ctx: CheckContext) -> CheckResult:
+        if not self.enabled:
+            return self.skip()
+        # Engine-side detection (см. scanner_core.evaluate_blind_pair).
+        return self.ok()
+
+
 # ══════════════════════════════════════════════════════════════════
 #  2. Command Injection (CMDi)
 # ══════════════════════════════════════════════════════════════════
@@ -1037,6 +1065,7 @@ class HTMLInjectionCheck(BaseCheck):
 ALL_INJECTION_CHECKS: list[type[BaseCheck]] = [
     SQLiErrorCheck,
     SQLiTimeCheck,
+    SQLiBlindCheck,
     CMDiCheck,
     SSTICheck,
     LDAPInjectionCheck,
