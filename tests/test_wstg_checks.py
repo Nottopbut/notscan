@@ -15,6 +15,7 @@ tests/test_wstg_checks.py — тесты WSTG-чеков каталога.
 
 from __future__ import annotations
 
+import contextlib
 import html
 import json
 import re
@@ -215,6 +216,113 @@ class _SpaHandler(BaseHTTPRequestHandler):
         pass
 
 
+class _ReflectHostHandler(BaseHTTPRequestHandler):
+    """Цель host-header-injection probe: отражает подменённый host в body/Location."""
+
+    protocol_version = "HTTP/1.1"
+    mode = "body"               # "body" | "location"
+    reflect_header: str | None = None  # None → первый из дефолтного списка
+
+    _CANDIDATES = ("X-Forwarded-Host", "X-Host", "Forwarded", "Host")
+
+    def _token(self) -> str:
+        candidates = [self.reflect_header] if self.reflect_header else list(self._CANDIDATES)
+        for header_name in candidates:
+            value = self.headers.get(header_name)
+            if value:
+                return value
+        return ""
+
+    def _send(self, status: int, body: bytes = b"", headers: dict | None = None) -> None:
+        self.send_response(status)
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def do_GET(self):  # noqa: N802
+        token = self._token()
+        if not token:
+            self._send(200, b"<html><body>ok</body></html>",
+                       {"Content-Type": "text/html"})
+            return
+        if self.mode == "location":
+            self._send(302, b"", {
+                "Content-Type": "text/html",
+                "Location": f"http://{token}/login",
+            })
+            return
+        body = f'<html><body><a href="http://{token}/x">x</a></body></html>'
+        self._send(200, body.encode("utf-8"), {"Content-Type": "text/html"})
+
+    def log_message(self, *args):
+        pass
+
+
+class _HostLocationHandler(_ReflectHostHandler):
+    mode = "location"
+
+
+class _HostCustomHeaderHandler(_ReflectHostHandler):
+    reflect_header = "X-Custom-Host"
+
+
+class _HostCookieGatedHandler(_ReflectHostHandler):
+    """Отражает host только при авторизованном запросе (Cookie) — bWAPP-кейс."""
+
+    def _token(self) -> str:
+        cookie = self.headers.get("Cookie") or ""
+        if "PHPSESSID" not in cookie:
+            return ""
+        return super()._token()
+
+
+class _HostDenialHandler(BaseHTTPRequestHandler):
+    """WAF-заглушка: 403 «Access denied» с токеном — не должна считаться находкой."""
+
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802
+        token = (self.headers.get("X-Forwarded-Host")
+                 or self.headers.get("X-Host")
+                 or self.headers.get("Forwarded")
+                 or self.headers.get("Host") or "")
+        body = f"Access denied for host {token}".encode("utf-8")
+        self.send_response(403)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class _HostPathRecorderHandler(_ReflectHostHandler):
+    """Запоминает, какие пути/методы реально пришли в host-header probe."""
+
+    seen: list[tuple[str, str]] = []
+
+    def do_GET(self):  # noqa: N802
+        _HostPathRecorderHandler.seen.append(
+            (self.path.split("?", 1)[0], self.command)
+        )
+        super().do_GET()
+
+
+@contextlib.contextmanager
+def _running_server(handler_cls):
+    server, thread, base = _serve(handler_cls)
+    try:
+        yield base
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def _serve(handler_cls):
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -268,13 +376,13 @@ def test_catalog_interface_is_stable():
 
 
 def test_catalog_complete_and_unique():
-    """39 чеков: 24 существующих + pseudo info_disclosure_paths + 14 новых."""
-    assert len(CHECK_CATALOG) == 39, f"ожидали 39 чеков, получили {len(CHECK_CATALOG)}"
+    """43 чека: 24 существующих + pseudo info_disclosure_paths + 18 новых."""
+    assert len(CHECK_CATALOG) == 43, f"ожидали 43 чека, получили {len(CHECK_CATALOG)}"
     ids = [cd.check_id for cd in CHECK_CATALOG]
     assert len(ids) == len(set(ids)), "check_id в каталоге должны быть уникальны"
     assert len(by_kind("active")) == 17
-    assert len(by_kind("passive")) == 16
-    assert len(by_kind("probe")) == 6
+    assert len(by_kind("passive")) == 19
+    assert len(by_kind("probe")) == 7
     assert ACTIVE_CHECK_IDS == tuple(c.check_id for c in by_kind("active"))
     assert PASSIVE_CHECK_IDS == tuple(c.check_id for c in by_kind("passive"))
     assert PROBE_CHECK_IDS == tuple(c.check_id for c in by_kind("probe"))
@@ -282,22 +390,21 @@ def test_catalog_complete_and_unique():
 
 
 def test_catalog_new_check_ids_exact_set():
-    """Ровно набор из: 6 passive + 2 active + 5 probe (+ legacy pseudo probe)."""
+    """Ровно набор round-2/3: 9 passive + 2 active + 6 probe (+ legacy pseudo probe)."""
     expected_passive = {
         "cookies", "hsts", "csp", "cache_control", "insecure_login", "browser_storage",
+        "server_fingerprint", "errh", "session_in_url",
     }
     expected_active = {"ssi_injection", "html_injection"}
-    expected_probe = {"sensitive_files", "metafiles", "ria_policy", "http_methods", "cors"}
+    expected_probe = {"sensitive_files", "metafiles", "ria_policy", "http_methods",
+                      "cors", "host_header_injection"}
     ids = {cd.check_id for cd in CHECK_CATALOG}
     assert expected_passive <= ids
     assert expected_active <= ids
     assert expected_probe <= ids
-    assert {"cookies", "hsts", "csp", "cache_control", "insecure_login",
-            "browser_storage"} <= {cd.check_id for cd in by_kind("passive")}
+    assert expected_passive <= {cd.check_id for cd in by_kind("passive")}
     assert {"ssi_injection", "html_injection"} <= {cd.check_id for cd in by_kind("active")}
-    assert {"sensitive_files", "metafiles", "ria_policy", "http_methods", "cors"} <= {
-        cd.check_id for cd in by_kind("probe")
-    }
+    assert expected_probe <= {cd.check_id for cd in by_kind("probe")}
 
 
 def test_catalog_fields_valid():
@@ -352,6 +459,11 @@ def test_catalog_fields_valid():
     ("ria_policy", "WSTG-CONF-08"),
     ("http_methods", "WSTG-CONF-06"),
     ("cors", "WSTG-CLNT-07"),
+    # round-3 quick wins
+    ("server_fingerprint", "WSTG-INFO-02"),
+    ("errh", "WSTG-ERRH-01"),
+    ("session_in_url", "WSTG-SESS-04"),
+    ("host_header_injection", "WSTG-INPV-17"),
 ])
 def test_catalog_wstg_ids(check_id, expected):
     assert wstg_id_for(check_id) == expected
@@ -363,6 +475,9 @@ def test_catalog_lookup_helpers():
     assert payload_file_for("no_such_check") is None
     assert catalog_get("no_such_check") is None
     assert payload_file_for("cookies") is None
+    for new_passive in ("server_fingerprint", "errh", "session_in_url"):
+        assert payload_file_for(new_passive) is None
+    assert payload_file_for("host_header_injection") is None
     assert payload_file_for("ssi_injection") == "ssi.txt"
     assert payload_file_for("html_injection") == "html_injection.txt"
     assert payload_file_for("sqli") == "sqli.txt"
@@ -437,7 +552,7 @@ def test_extra_passive_checks_registered():
         assert reg.get(cls.check_id) is not None, f"{cls.check_id} не в registry"
         assert cls.passive is True
         assert cls.requires_payload is False
-    assert len(ALL_EXTRA_PASSIVE_CHECKS) == 6
+    assert len(ALL_EXTRA_PASSIVE_CHECKS) == 9
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -690,6 +805,157 @@ def test_browser_storage_tp_jwt_value_property():
         ),
     )
     assert findings
+
+
+# ── server_fingerprint (WSTG-INFO-02) ──
+
+def test_server_fingerprint_tp_headers_cookie_meta():
+    findings = _run_passive(
+        "server_fingerprint",
+        resp_headers={
+            "server": "nginx/1.24.0",
+            "x-powered-by": "PHP/8.1.2",
+            "set-cookie": "PHPSESSID=abc123; Path=/",
+        },
+        resp_text='<html><head><meta name="generator" content="WordPress 6.4">'
+                  "</head></html>",
+    )
+    assert len(findings) == 1, "должен быть ровно один finding на response"
+    evidence = findings[0].evidence
+    for needle in ("Server: nginx/1.24.0", "X-Powered-By: PHP/8.1.2",
+                   "PHPSESSID", "WordPress 6.4"):
+        assert needle in evidence, f"нет {needle!r} в {evidence!r}"
+
+
+def test_server_fingerprint_fp_clean_response():
+    findings = _run_passive(
+        "server_fingerprint",
+        resp_headers={"content-type": "text/plain"},
+        resp_text="plain text",
+    )
+    assert findings == [], "пустой fingerprint не должен флагаться"
+
+
+def test_server_fingerprint_one_finding_per_response():
+    findings = _run_passive(
+        "server_fingerprint",
+        resp_headers={"server": "Apache/2.4.58", "via": "1.1 proxy"},
+    )
+    assert len(findings) == 1
+
+
+# ── errh (WSTG-ERRH-01/02) ──
+
+def test_errh_tp_python_traceback():
+    findings = _run_passive(
+        "errh",
+        resp_headers={"content-type": "text/html"},
+        resp_text=('Traceback (most recent call last):\n'
+                   '  File "/app/views.py", line 42, in handler\n'
+                   "ValueError: boom"),
+        resp_status=500,
+    )
+    assert len(findings) == 1
+    assert "Traceback" in findings[0].evidence
+
+
+def test_errh_tp_django_debug_on_200():
+    findings = _run_passive(
+        "errh",
+        resp_text="Django Version: 4.2\n"
+                  "You're seeing this error because you have DEBUG = True",
+        resp_status=200,
+    )
+    assert findings, "DEBUG-страница должна детектиться и при 200"
+
+
+def test_errh_tp_sql_error_only_on_4xx_5xx():
+    tp = _run_passive(
+        "errh",
+        resp_text="You have an error in your SQL syntax; check the manual",
+        resp_status=500,
+    )
+    assert tp, "SQL-ошибка при 500 — находка"
+    fp = _run_passive(
+        "errh",
+        resp_text="Пример: You have an error in your SQL syntax — так выглядит ошибка",
+        resp_status=200,
+    )
+    assert fp == [], "SQL-паттерн в обычном тексте 200 — не находка"
+
+
+def test_errh_fp_plain_error_word():
+    findings = _run_passive(
+        "errh",
+        resp_text="An error occurred. Please try again later.",
+        resp_status=200,
+    )
+    assert findings == []
+
+
+# ── session_in_url (WSTG-SESS-04) ──
+
+def test_session_in_url_tp_query_and_masking():
+    token = "a" * 32
+    findings = _run_passive(
+        "session_in_url",
+        url=f"http://example.test/page?PHPSESSID={token}&q=1",
+    )
+    assert len(findings) == 1
+    evidence = findings[0].evidence
+    assert "PHPSESSID" in evidence
+    assert token not in evidence, "секрет должен быть замаскирован в evidence"
+
+
+def test_session_in_url_tp_jsessionid_in_path():
+    token = "B" * 24
+    findings = _run_passive(
+        "session_in_url",
+        url=f"http://example.test/app;jsessionid={token}?x=1",
+    )
+    assert findings
+    assert "path" in findings[0].evidence
+
+
+def test_session_in_url_tp_location_redirect():
+    """bWAPP-кейс: 302 Location с ?PHPSESSID=... (значение маскируется)."""
+    token = "d" * 32
+    findings = _run_passive(
+        "session_in_url",
+        url="http://example.test/smgmt_sessionid_url.php",
+        resp_headers={
+            "location": f"smgmt_sessionid_url.php?PHPSESSID={token}",
+        },
+        resp_status=302,
+    )
+    assert len(findings) == 1
+    evidence = findings[0].evidence
+    assert "PHPSESSID" in evidence and "Location" in evidence
+    assert token not in evidence, "секрет должен быть замаскирован"
+
+
+def test_session_in_url_tp_referer():
+    token = "c" * 20
+    findings = _run_passive(
+        "session_in_url",
+        url="http://example.test/page",
+        req_headers={"Referer": f"http://example.test/x?access_token={token}"},
+    )
+    assert findings
+    assert "access_token" in findings[0].evidence
+    assert token not in findings[0].evidence
+
+
+def test_session_in_url_fp_short_and_normal_params():
+    assert _run_passive(
+        "session_in_url", url="http://example.test/page?sid=abc&q=hello"
+    ) == []
+    assert _run_passive(
+        "session_in_url", url="http://example.test/page?token=short"
+    ) == []
+    assert _run_passive(
+        "session_in_url", url="http://example.test/page?id=12345&q=hello"
+    ) == []
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1117,3 +1383,123 @@ def test_probe_soft_404_suppressed(spa_server, tmp_db):
     assert path_probe.run_probe_scan(
         [spa_server], ["sensitive_files", "metafiles"], log_cb=lambda _m: None,
     ) == 0
+
+
+# ══════════════════════════════════════════════════════════════════
+#  7. Probe host_header_injection (WSTG-INPV-17 / INJT-17 v5)
+# ══════════════════════════════════════════════════════════════════
+
+def test_host_header_probe_public_api_and_defaults():
+    import inspect
+
+    params = inspect.signature(path_probe.run_probe_scan).parameters
+    assert "host_headers" in params, "run_probe_scan должен принимать host_headers"
+    assert params["host_headers"].default is None, "default host_headers = None"
+    assert "extra_headers" in params, "run_probe_scan должен принимать extra_headers"
+    assert params["extra_headers"].default is None, "default extra_headers = None"
+    assert path_probe._normalize_extra_headers(
+        [("Cookie", "a=1"), ("cookie", "b=2"), ("X-Test", " v ")]
+    ) == {"Cookie": "a=1; b=2", "X-Test": "v"}
+    assert path_probe._normalize_extra_headers([("Bad Name", "x"), ("", "y")]) == {}
+    # CR/LF в значении вычищаются (защита от header injection в probe-клиенте)
+    assert path_probe._normalize_extra_headers([("X-T", "a\r\nb")]) == {"X-T": "ab"}
+    assert path_probe.normalize_host_headers(None) == list(
+        path_probe.DEFAULT_HOST_HEADERS
+    )
+    assert path_probe.normalize_host_headers([]) == list(
+        path_probe.DEFAULT_HOST_HEADERS
+    )
+    assert path_probe.normalize_host_headers(
+        ["X-Custom-Host", "x-custom-host", " "]
+    ) == ["X-Custom-Host"]
+    assert set(path_probe.DEFAULT_HOST_HEADERS) == {
+        "Host", "X-Forwarded-Host", "X-Host", "Forwarded",
+    }
+
+
+def test_host_header_probe_tp_body(tmp_db):
+    with _running_server(_ReflectHostHandler) as base:
+        count = path_probe.run_probe_scan(
+            [base], ["host_header_injection"], log_cb=lambda _m: None,
+        )
+    rows = _probe_rows("host_header_injection")
+    assert count == len(rows) == 1, "ожидался ровно 1 finding на host"
+    evidence = rows[0]["evidence"]
+    assert "notscan.invalid" in evidence
+    assert "body" in evidence or "absolute URL" in evidence
+    meta = db.fetch_scan_meta_by_result(rows[0]["id"])
+    assert meta and meta["detector"] == "probe"
+    assert meta["severity"] == "HIGH"
+
+
+def test_host_header_probe_tp_location(tmp_db):
+    with _running_server(_HostLocationHandler) as base:
+        count = path_probe.run_probe_scan(
+            [base], ["host_header_injection"], log_cb=lambda _m: None,
+        )
+    rows = _probe_rows("host_header_injection")
+    assert count == len(rows) == 1
+    assert "Location" in rows[0]["evidence"]
+
+
+def test_host_header_probe_no_fp_clean_server(probe_server, tmp_db):
+    """Сервер, игнорирующий host-заголовки, не даёт находок."""
+    assert path_probe.run_probe_scan(
+        [probe_server], ["host_header_injection"], log_cb=lambda _m: None,
+    ) == 0
+
+
+def test_host_header_probe_custom_headers(tmp_db):
+    """Кастомный список host_headers передаётся в probe (GUI-настройка)."""
+    with _running_server(_HostCustomHeaderHandler) as base:
+        assert path_probe.run_probe_scan(
+            [base], ["host_header_injection"], log_cb=lambda _m: None,
+        ) == 0, "дефолтные заголовки не отражаются"
+        count = path_probe.run_probe_scan(
+            [base], ["host_header_injection"], log_cb=lambda _m: None,
+            host_headers=["X-Custom-Host"],
+        )
+    rows = _probe_rows("host_header_injection")
+    assert count == len(rows) == 1
+    assert "X-Custom-Host" in rows[0]["evidence"]
+
+
+def test_host_header_probe_uses_scan_paths_skips_static(tmp_db):
+    """bWAPP-кейс: probe идёт по путям из scan-list (GET), статику пропускает."""
+    _HostPathRecorderHandler.seen = []
+    with _running_server(_HostPathRecorderHandler) as base:
+        count = path_probe.run_probe_scan(
+            [base + "/account", base + "/style.css", base + "/logo.png"],
+            ["host_header_injection"], log_cb=lambda _m: None,
+        )
+    rows = _probe_rows("host_header_injection")
+    assert count == len(rows) == 1
+    assert "/account" in rows[0]["url"], rows[0]["url"]
+    probed_paths = {path for path, _method in _HostPathRecorderHandler.seen}
+    assert "/account" in probed_paths
+    assert "/style.css" not in probed_paths, "статика не должна пробоваться"
+    assert "/logo.png" not in probed_paths
+    assert all(method == "GET" for _path, method in _HostPathRecorderHandler.seen)
+
+
+def test_host_header_probe_extra_headers_auth_page(tmp_db):
+    """Host-header отражается только на auth-странице (Cookie) — bWAPP-кейс."""
+    with _running_server(_HostCookieGatedHandler) as base:
+        assert path_probe.run_probe_scan(
+            [base], ["host_header_injection"], log_cb=lambda _m: None,
+        ) == 0, "без Cookie отражения нет"
+        count = path_probe.run_probe_scan(
+            [base], ["host_header_injection"], log_cb=lambda _m: None,
+            extra_headers=[("Cookie", "PHPSESSID=abc1234567890; security_level=0")],
+        )
+    rows = _probe_rows("host_header_injection")
+    assert count == len(rows) == 1
+    assert "notscan.invalid" in rows[0]["evidence"]
+
+
+def test_host_header_probe_denial_filtered(tmp_db):
+    """WAF/denial-страница с токеном — не host-header injection (FP-фильтр)."""
+    with _running_server(_HostDenialHandler) as base:
+        assert path_probe.run_probe_scan(
+            [base], ["host_header_injection"], log_cb=lambda _m: None,
+        ) == 0

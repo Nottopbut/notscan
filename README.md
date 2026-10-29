@@ -13,7 +13,7 @@ and reports.
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey)
 ![WSTG](https://img.shields.io/badge/OWASP-WSTG%20v4.2%2Fv5-orange)
-![checks](https://img.shields.io/badge/checks-39%20(17%20active%20%2F%2016%20passive%20%2F%206%20probe)-informational)
+![checks](https://img.shields.io/badge/checks-43%20(17%20active%20%2F%2019%20passive%20%2F%207%20probe)-informational)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
 ---
@@ -32,9 +32,9 @@ and reports.
   Async engine (`asyncio` + `httpx.AsyncClient`) with configurable concurrency, RPS limit
   and scope guard; redirects are **never followed** (a payload-controlled redirect must not
   turn a scan into an outbound request).
-- **WSTG check catalog (39 checks)** — a single catalog (`checks/catalog.py`) drives the GUI
+- **WSTG check catalog (43 checks)** — a single catalog (`checks/catalog.py`) drives the GUI
   Checks/WSTG tab, the scan-config badges, the WSTG map of findings and payload files:
-  **17 active + 16 passive + 6 probe**. WSTG IDs are aligned with OWASP WSTG v4.2 and the
+  **17 active + 19 passive + 7 probe**. WSTG IDs are aligned with OWASP WSTG v4.2 and the
   v5 checklist (tests missing from v4.2 are marked `(v5)`). Full table:
   [`docs/CHECKS.md`](docs/CHECKS.md).
   - Active: SQLi (error-based, time-based blind and boolean-based blind with response
@@ -61,6 +61,13 @@ and reports.
   (baseline / benign / suspicious replay), paginated results.
 - **Reports** — Markdown, JSON, HTML, SARIF, DOCX; the full result set is exported by
   default (no silent truncation).
+- **Raw/XML body mutations** — XML/SOAP/PHP-serialized and other raw bodies get a
+  `body_raw` mutation point, so **XXE** and **insecure deserialization** checks actually
+  generate requests (previously declarative-only).
+- **Injection targets** — in the scan window you can choose which headers host-header
+  injection tests (`inject_headers`), limit mutations to specific parameter names
+  (`only_params`), and add extra probe headers such as `Cookie: PHPSESSID=...` for
+  authenticated probe checks (`probe_extra_headers`).
 - **Payload sets** — ~3.6k payloads across 19 sets with dedicated **WAF-bypass
   variants** (case/comment obfuscation, encoding/HTML-entity/unicode tricks, IP
   representations) in every injection set (SQLi incl. boolean-blind true/false
@@ -102,7 +109,7 @@ python notscan.py
    press **＋ Add to Scan list**, then **▶ Run Scan**.
 4. In the scan-config window pick checks (active / passive / probe), mutation points and
    ROE options (concurrency, RPS, scope allowlist, Safe Mode, tamper), then **Start Scan**.
-   **All checks are disabled by default** (the window shows `0 / 39 checks enabled`): enable
+   **All checks are disabled by default** (the window shows `0 / 43 checks enabled`): enable
    the ones you need or press **All ON**; badges show ☐/☑ state.
 5. Review findings in **Scan Results** (severity, evidence, raw HTTP, diff, confirm flow)
    and export a report (MD / JSON / HTML / SARIF / DOCX).

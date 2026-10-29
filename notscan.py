@@ -84,6 +84,72 @@ def _truncate(s: Optional[str], n: int = 60) -> str:
     return s[:n] + ("…" if len(s) > n else "")
 
 
+# ── Куда инжектить: заголовки/параметры (ScanConfig → engine/probe) ──
+# Дефолтные заголовки для host-header-injection probe. Пустое поле = этот дефолт.
+DEFAULT_INJECT_HEADERS: tuple[str, ...] = (
+    "Host",
+    "X-Forwarded-Host",
+    "X-Host",
+    "Forwarded",
+)
+DEFAULT_INJECT_HEADERS_STR = ", ".join(DEFAULT_INJECT_HEADERS)
+
+
+def parse_extra_headers(value) -> list[tuple[str, str]]:
+    """Разбирает "Name: value" построчно → [(name, value), ...].
+
+    Принимает строку с \n / список строк из settings.json. Пустые строки и
+    строки без ':' игнорируются, порядок сохраняется, ключи/значения trim.
+    Нужно для probe-чеков (напр. Cookie: PHPSESSID=... для аутентифицированной
+    страницы); значения в лог не пишутся.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_lines = [line for item in value for line in str(item).splitlines()]
+    else:
+        raw_lines = str(value).splitlines()
+    pairs: list[tuple[str, str]] = []
+    for line in raw_lines:
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        name, _, header_value = line.partition(":")
+        name = name.strip()
+        header_value = header_value.strip()
+        if not name or not header_value:
+            continue
+        pairs.append((name, header_value))
+    return pairs
+
+
+def parse_csv_names(value) -> list[str]:
+    """Разбирает "a, b,,a ; c" → ['a', 'b', 'c'] (trim/дедуп, без падений).
+
+    Терпит None, списки/кортежи (settings.json могут хранить list), лишние
+    разделители (запятая/точка с запятой) и кавычки. Регистр для дедупа
+    не важен, исходное написание сохраняется.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        parts = [str(item) for item in value]
+    else:
+        parts = str(value).replace(";", ",").split(",")
+    names: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        name = str(part).strip().strip("'\"").strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(name)
+    return names
+
+
 def _baseline_for_result(result_id: int, method: str, url: str) -> Optional[dict]:
     """
     Возвращает baseline-запись history для результата скана.
@@ -1220,7 +1286,7 @@ class ScanConfigWindow(tk.Toplevel):
         tokens = getattr(parent, "_tokens", None) or ui_theme.get_tokens("dark")
         self.configure(bg=tokens.app_bg)
         self.title("Scan configuration")
-        self.geometry("900x760")
+        self.geometry("900x840")
         self.transient(parent)
         self._build()
         try:
@@ -1364,6 +1430,70 @@ class ScanConfigWindow(tk.Toplevel):
         ]:
             ttk.Checkbutton(mut_lf, text=text, variable=var).pack(side=tk.LEFT, padx=6, pady=4)
 
+        # ── Куда именно инжектить (headers для probe, ограничение параметров) ──
+        targets_lf = ttk.LabelFrame(self, text="Injection targets (advanced)")
+        targets_lf.pack(fill=tk.X, padx=8, pady=2)
+
+        hdr_row = ttk.Frame(targets_lf)
+        hdr_row.pack(fill=tk.X, padx=6, pady=(4, 0))
+        ttk.Label(hdr_row, text="Injection headers (comma-separated; empty = default):").pack(
+            side=tk.LEFT)
+        self._inject_headers_entry = ttk.Entry(
+            hdr_row, textvariable=p._inject_headers_var, width=38)
+        self._inject_headers_entry.pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        ttk.Label(
+            targets_lf,
+            text=f"  default: {DEFAULT_INJECT_HEADERS_STR}  ·  используется host-header-injection probe",
+            foreground="#a6adc8",
+        ).pack(anchor="w", padx=6)
+
+        par_row = ttk.Frame(targets_lf)
+        par_row.pack(fill=tk.X, padx=6, pady=(4, 0))
+        ttk.Label(par_row, text="Only parameters (comma-separated; empty = all):").pack(
+            side=tk.LEFT)
+        self._only_params_entry = ttk.Entry(
+            par_row, textvariable=p._only_params_var, width=38)
+        self._only_params_entry.pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        ttk.Label(
+            targets_lf,
+            text="  e.g. id, q, username — остальные параметры не мутируются (пусто = все)",
+            foreground="#a6adc8",
+        ).pack(anchor="w", padx=6, pady=(0, 4))
+
+        extra_lbl_row = ttk.Frame(targets_lf)
+        extra_lbl_row.pack(fill=tk.X, padx=6, pady=(2, 0))
+        ttk.Label(
+            extra_lbl_row,
+            text="Extra probe headers (for probes; e.g. Cookie: PHPSESSID=...; one per line):",
+        ).pack(side=tk.LEFT)
+        extra_row = ttk.Frame(targets_lf)
+        extra_row.pack(fill=tk.X, padx=6, pady=(0, 4))
+        self._probe_extra_headers_text = tk.Text(
+            extra_row, height=3, font=("Consolas", 9), wrap=tk.NONE,
+        )
+        _tokens = getattr(p, "_tokens", None) or ui_theme.get_tokens("dark")
+        ui_theme.apply_text_theme(self._probe_extra_headers_text, _tokens)
+        self._probe_extra_headers_text.insert("1.0", p._probe_extra_headers_var.get())
+        self._probe_extra_headers_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        def _sync_probe_extra_headers(_event=None):
+            try:
+                p._probe_extra_headers_var.set(
+                    self._probe_extra_headers_text.get("1.0", tk.END).strip()
+                )
+            except Exception:
+                pass
+
+        self._probe_extra_headers_text.bind("<KeyRelease>", _sync_probe_extra_headers)
+        self._probe_extra_headers_text.bind("<FocusOut>", _sync_probe_extra_headers)
+        ttk.Label(
+            targets_lf,
+            text="  отправляется только probe-чекам (sensitive files/metafiles/host-header/CORS/…), не в мутации",
+            foreground="#a6adc8",
+        ).pack(anchor="w", padx=6, pady=(0, 4))
+        for _entry in (self._inject_headers_entry, self._only_params_entry):
+            _entry.bind("<FocusOut>", lambda _e: p._save_proxy_settings())
+
         opt = ttk.Frame(self)
         opt.pack(fill=tk.X, padx=8, pady=2)
         ttk.Label(opt, text="Workers:").pack(side=tk.LEFT, padx=(0, 4))
@@ -1381,7 +1511,26 @@ class ScanConfigWindow(tk.Toplevel):
         ttk.Button(btns, text="▶ Start Scan", style="Success.TButton", command=self._start).pack(side=tk.RIGHT, padx=4)
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=4)
 
+    def _sync_probe_extra_headers_field(self) -> None:
+        """Text (проба-заголовки) → StringVar App (вызывается при старте скана)."""
+        try:
+            text_widget = getattr(self, "_probe_extra_headers_text", None)
+            if text_widget is None:
+                return
+            self._parent._probe_extra_headers_var.set(
+                text_widget.get("1.0", tk.END).strip()
+            )
+        except Exception:
+            pass
+
     def _start(self):
+        # Сохраняем injection targets/настройки в settings.json перед стартом скана
+        # (на случай, если пользователь ввёл значения и сразу нажал Start).
+        self._sync_probe_extra_headers_field()
+        try:
+            self._parent._save_proxy_settings()
+        except Exception:
+            pass
         cb = self._on_start
         self.destroy()
         if cb:
@@ -1684,6 +1833,11 @@ class App(tk.Tk):
         for _cid, _on in check_var_defs():
             self._check_vars[_cid] = tk.BooleanVar(value=_on)
         self._workers_var = tk.StringVar(value="10")
+        # Куда инжектить (ScanConfig → build_scan_tasks/run_probe_scan), персист в settings.
+        self._inject_headers_var = tk.StringVar(value=DEFAULT_INJECT_HEADERS_STR)
+        self._only_params_var = tk.StringVar(value="")
+        # Доп. заголовки для probe-запросов: построчно "Name: value" (напр. Cookie).
+        self._probe_extra_headers_var = tk.StringVar(value="")
         self._mut_query = tk.BooleanVar(value=True)
         self._mut_form = tk.BooleanVar(value=True)
         self._mut_json = tk.BooleanVar(value=True)
@@ -1824,16 +1978,43 @@ class App(tk.Tk):
     def _run_probe_scan(self, urls: list[str], probe_ids: list[str]) -> int:
         """Probe-чеки (WSTG): run_probe_scan из path_probe с fallback на старый API.
 
-         добавляет path_probe.run_probe_scan(urls, probe_ids, log_cb=…);
-        пока его нет — работает прежний run_info_disclosure_scan.
+        host_headers пробрасывается, если path_probe.run_probe_scan уже принимает
+        этот keyword (wstg-checks добавляет его параллельно) — проверяем по
+        inspect.signature, чтобы GUI не падал до мержа.
         """
+        host_headers = self._scan_host_headers()
+        extra_headers = self._scan_probe_extra_headers()
         runner = getattr(path_probe, "run_probe_scan", None)
         if runner is not None:
+            kwargs = {"log_cb": self.log}
             try:
-                return runner(urls, probe_ids, log_cb=self.log)
+                import inspect as _inspect
+                probe_params = _inspect.signature(runner).parameters
+            except (TypeError, ValueError):
+                probe_params = {}
+            if "host_headers" in probe_params:
+                kwargs["host_headers"] = host_headers
+            if "extra_headers" in probe_params:
+                kwargs["extra_headers"] = extra_headers or None
+            if "host_headers" in kwargs and host_headers:
+                self.log(f"[PROBE] host headers for probe: {host_headers}")
+            if extra_headers:
+                # Значения не логируем — там могут быть Cookie/токены.
+                self.log(
+                    "[PROBE] extra headers for probe: "
+                    f"{[name for name, _value in extra_headers]}"
+                )
+            try:
+                return runner(urls, probe_ids, **kwargs)
             except TypeError:
                 try:
-                    return runner(urls=urls, probe_ids=probe_ids, log_cb=self.log)
+                    return runner(urls=urls, probe_ids=probe_ids, **kwargs)
+                except TypeError:
+                    # совсем старый API без **kwargs — без host_headers
+                    try:
+                        return runner(urls=urls, probe_ids=probe_ids, log_cb=self.log)
+                    except Exception as exc:
+                        self.log(f"[PROBE][WARN] run_probe_scan failed: {exc} — fallback")
                 except Exception as exc:
                     self.log(f"[PROBE][WARN] run_probe_scan failed: {exc} — fallback")
             except Exception as exc:
@@ -2646,9 +2827,45 @@ class App(tk.Tk):
             entry = getattr(self, "_burp_browser_profile", None)
             if entry is not None:
                 out["burp_browser_profile"] = (entry.get() or "").strip()
+            var = getattr(self, "_inject_headers_var", None)
+            if var is not None:
+                # Нормализуем ввод (trim/дедуп) — мусор не попадает в settings.
+                out["inject_headers"] = ", ".join(parse_csv_names(var.get()))
+            var = getattr(self, "_only_params_var", None)
+            if var is not None:
+                out["only_params"] = ", ".join(parse_csv_names(var.get()))
+            var = getattr(self, "_probe_extra_headers_var", None)
+            if var is not None:
+                # Нормализованный список строк "Name: value" (порядок сохраняем).
+                out["probe_extra_headers"] = [
+                    f"{name}: {value}" for name, value in parse_extra_headers(var.get())
+                ]
         except Exception:
             pass
         return out
+
+    def _scan_probe_extra_headers(self) -> list[tuple[str, str]]:
+        """Доп. заголовки для probe-чеков: [(name, value), ...] (пусто → [])."""
+        try:
+            return parse_extra_headers(self._probe_extra_headers_var.get())
+        except Exception:
+            return []
+
+    def _scan_host_headers(self) -> list[str] | None:
+        """Заголовки для host-header-injection probe: список или None (дефолт)."""
+        try:
+            names = parse_csv_names(self._inject_headers_var.get())
+        except Exception:
+            names = []
+        return names or None
+
+    def _scan_only_params(self) -> list[str] | None:
+        """Ограничение мутационного скана параметрами: список или None (все)."""
+        try:
+            names = parse_csv_names(self._only_params_var.get())
+        except Exception:
+            names = []
+        return names or None
 
     def _apply_proxy_noise_filter(self, desired: bool | None = None) -> None:
         """Применяет настройку фильтра шума к запущенному прокси (без рестарта).
@@ -2725,6 +2942,22 @@ class App(tk.Tk):
                  bool(settings.get("roe_stop_on_session_drift", True)))
         _set_entry("_burp_browser_path", settings.get("burp_browser_path"))
         _set_entry("_burp_browser_profile", settings.get("burp_browser_profile"))
+
+        inject_headers = settings.get("inject_headers", DEFAULT_INJECT_HEADERS_STR)
+        if isinstance(inject_headers, (list, tuple)):
+            inject_headers = ", ".join(str(item) for item in inject_headers)
+        _set_var("_inject_headers_var", str(inject_headers or ""))
+        only_params = settings.get("only_params", "")
+        if isinstance(only_params, (list, tuple)):
+            only_params = ", ".join(str(item) for item in only_params)
+        _set_var("_only_params_var", str(only_params or ""))
+
+        extra_headers = settings.get("probe_extra_headers", [])
+        if isinstance(extra_headers, (list, tuple)):
+            extra_headers = "\n".join(str(item) for item in extra_headers)
+        elif extra_headers is None:
+            extra_headers = ""
+        _set_var("_probe_extra_headers_var", str(extra_headers or ""))
 
     def _bind_settings_autosave(self) -> None:
         """FocusOut-автосохранение текстовых полей Settings tab."""
@@ -3283,7 +3516,13 @@ class App(tk.Tk):
     # ──────────────────────────── History ────────────────────────────
 
     def _on_closing(self) -> None:
-        """Корректное закрытие: синхронно освобождаем порт прокси и выходим."""
+        """Корректное закрытие: сохраняем настройки, освобождаем порт и выходим."""
+        # Сохраняем Settings/scan-scope/injection targets (в т.ч. правки в
+        # ScanConfig, для которых пользователь не нажал Start).
+        try:
+            self._save_proxy_settings()
+        except Exception:
+            pass
         try:
             self._shutdown_proxy_sync()
         except Exception as exc:
@@ -4007,6 +4246,12 @@ class App(tk.Tk):
                     except AttributeError:
                         _csrf_provider = None
                     _build_kwargs["csrf_token_provider"] = _csrf_provider
+                if "only_params" in _build_params:
+                    # «Only parameters»: пусто = мутировать все параметры.
+                    _only_params = self._scan_only_params()
+                    _build_kwargs["only_params"] = _only_params
+                    if _only_params:
+                        self.log(f"[SCAN] Only parameters: {_only_params}")
                 tasks = scanner_core.build_scan_tasks(**_build_kwargs)
             except Exception as _exc:
                 import traceback as _tb

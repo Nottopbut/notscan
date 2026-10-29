@@ -10,6 +10,9 @@ requires_payload=False) — новых сетевых запросов не де
   4. cache_control  — WSTG-ATHN-06: чувствительный ответ без Cache-Control: no-store/private
   5. insecure_login — WSTG-ATHN-01/CRYP-03: логин/пароль/Authorization по http://
   6. browser_storage— WSTG-CLNT-12: секреты/токены в localStorage/sessionStorage
+  7. server_fingerprint — WSTG-INFO-02: Server/X-Powered-By/framework cookie/meta generator
+  8. errh           — WSTG-ERRH-01/02: verbose errors / stack traces / DEBUG-страницы
+  9. session_in_url — WSTG-SESS-04: session-токены в query/path/Referer (query string)
 
 Чеки регистрируются в checks/registry.CheckRegistry (см. ALL_EXTRA_PASSIVE_CHECKS).
 """
@@ -17,7 +20,7 @@ requires_payload=False) — новых сетевых запросов не де
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 from .base import (
     BaseCheck, CheckContext, CheckResult,
@@ -560,6 +563,294 @@ class BrowserStorageCheck(BaseCheck):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  7. Server / framework fingerprint — WSTG-INFO-02
+# ══════════════════════════════════════════════════════════════════
+
+# Заголовки, раскрывающие сервер/фреймворк/прокси (label для evidence).
+_FINGERPRINT_HEADERS = (
+    ("server", "Server"),
+    ("x-powered-by", "X-Powered-By"),
+    ("x-aspnet-version", "X-AspNet-Version"),
+    ("x-generator", "X-Generator"),
+    ("x-drupal-cache", "X-Drupal-Cache"),
+    ("x-varnish", "X-Varnish"),
+    ("via", "Via"),
+)
+
+# Framework/язык-специфичные cookie (имя обычно сразу выдаёт стек).
+_FRAMEWORK_COOKIE_MARKERS = (
+    "phpsessid", "jsessionid", "asp.net_sessionid", "laravel_session",
+    "ci_session", "wordpress", "wp-settings", "drupal", "xsrf-token",
+    "connect.sid", "grafana_session", "jsf", "cakephp", "fuelcid",
+)
+
+_META_TAG_RE = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
+_META_GENERATOR_NAME_RE = re.compile(
+    r"""name\s*=\s*["']generator["']""", re.IGNORECASE
+)
+_META_CONTENT_RE = re.compile(
+    r"""content\s*=\s*["']([^"']{1,120})["']""", re.IGNORECASE
+)
+
+
+def _meta_generator(text: str) -> str:
+    """Значение <meta name="generator" content="..."> ("" если нет)."""
+    for tag_match in _META_TAG_RE.finditer(text or ""):
+        tag = tag_match.group(0)
+        if not _META_GENERATOR_NAME_RE.search(tag):
+            continue
+        content = _META_CONTENT_RE.search(tag)
+        if content:
+            return content.group(1).strip()
+    return ""
+
+
+class ServerFingerprintCheck(BaseCheck):
+    """Раскрытие версии сервера/фреймворка в заголовках/cookie/meta (INFO)."""
+
+    check_id = "server_fingerprint"
+    vuln_type = "server_fingerprint"
+    category = VulnCategory.INFO_DISCLOSURE
+    severity = Severity.LOW
+    name = "Web Server / Framework Fingerprint"
+    description = "WSTG-INFO-02: Server/X-Powered-By/cookie/meta generator."
+    cwe = "CWE-200"
+    passive = True
+    requires_payload = False
+
+    MAX_PARTS = 8
+    MAX_TEXT = 200_000
+
+    def check(self, req: ScanRequest, resp: ScanResponse, ctx: CheckContext) -> CheckResult:
+        if not self.enabled:
+            return self.skip()
+
+        parts: list[str] = []
+        for header_name, label in _FINGERPRINT_HEADERS:
+            value = _get_header(resp.headers, header_name).strip()
+            if value:
+                parts.append(f"{label}: {value[:80]}")
+            if len(parts) >= self.MAX_PARTS:
+                break
+
+        cookies = sorted({c.name for c in _parse_cookies(resp.headers)})
+        framework_cookies = [
+            name for name in cookies
+            if any(marker in name.lower() for marker in _FRAMEWORK_COOKIE_MARKERS)
+        ]
+        if framework_cookies:
+            parts.append("set-cookie: " + ", ".join(framework_cookies[:6]))
+
+        generator = _meta_generator(_body_text(resp, self.MAX_TEXT))
+        if generator:
+            parts.append(f"meta generator: {generator[:80]}")
+
+        if not parts:
+            return self.ok()
+
+        return self.found(self.make_finding(
+            "Fingerprint: " + "; ".join(parts[: self.MAX_PARTS]),
+            req, resp, ctx,
+            recommendation="Скрой версии/технологии: не отдавай Server/X-Powered-By/"
+                           "X-AspNet-Version, переименуй framework-cookie, убери meta generator.",
+            cwe=self.cwe,
+        ))
+
+
+# ══════════════════════════════════════════════════════════════════
+#  8. Verbose errors / stack traces — WSTG-ERRH-01/02
+# ══════════════════════════════════════════════════════════════════
+
+# Явные stack trace / DEBUG (флагуем независимо от статуса ответа).
+_ERRH_STRONG_PATTERNS = (
+    ("Traceback (Python)",
+     re.compile(r"traceback \(most recent call last\)", re.IGNORECASE)),
+    ("Python stack frame",
+     re.compile(r'\bFile\s+"[^"]+",\s+line\s+\d+', re.IGNORECASE)),
+    ("Java stack trace",
+     re.compile(r"\bat\s+[\w$.]+(?:\([\w$]+\.java:\d+\)|\(Native Method\))",
+                re.IGNORECASE)),
+    ("PHP warning/fatal",
+     re.compile(r"\b(?:PHP\s+)?(?:Warning|Fatal error|Parse error|Notice):\s+"
+                r"[^\n]{0,200}(?:in\s+/|on line \d+)", re.IGNORECASE)),
+    ("Django DEBUG",
+     re.compile(r"(?:Django Version:|DEBUG = True|"
+                r"seeing this error because you have)", re.IGNORECASE)),
+    ("Symfony/Whoops stack trace",
+     re.compile(r"(?:Whoops!|Symfony\\Component\\|Twig\\Error|"
+                r"Stack trace:)", re.IGNORECASE)),
+    ("ASP.NET error page",
+     re.compile(r"(?:Server Error in '/' Application|ASP\.NET Version:|"
+                r"System\.(?:NullReference|Web|Data|IO|InvalidOperation)"
+                r"[A-Za-z]*Exception)", re.IGNORECASE)),
+)
+
+# «Слабые» признаки (ошибки БД/ORM) — только для status >= 400, чтобы не
+# флагать статьи/документацию, где встречаются эти слова.
+_ERRH_WEAK_PATTERNS = (
+    ("SQL error",
+     re.compile(r"(?:You have an error in your SQL syntax|SQLSTATE\[|"
+                r"ORA-\d{5}|Microsoft OLE DB Provider for SQL Server|"
+                r"Unclosed quotation mark|quoted string not properly terminated)",
+                re.IGNORECASE)),
+    ("DB/ORM exception",
+     re.compile(r"(?:PDOException|SQLite3\.OperationalError|psycopg2\.|"
+                r"java\.sql\.SQLException|SequelizeDatabaseError|"
+                r"MongoServerError)", re.IGNORECASE)),
+    ("Unhandled exception banner",
+     re.compile(r"(?:Uncaught (?:Exception|Error)|Internal Server Error\s*:?\s*"
+                r"[A-Za-z.]+Exception)", re.IGNORECASE)),
+)
+
+
+class ErrorHandlingCheck(BaseCheck):
+    """Подробные ошибки/stack traces/DEBUG-страницы в ответах."""
+
+    check_id = "errh"
+    vuln_type = "errh"
+    category = VulnCategory.INFO_DISCLOSURE
+    severity = Severity.MEDIUM
+    name = "Verbose Error Handling / Stack Traces"
+    description = "WSTG-ERRH-01/02: stack traces, DEBUG-страницы, SQL/ORM errors."
+    cwe = "CWE-209"
+    passive = True
+    requires_payload = False
+
+    MAX_HITS = 3
+    MAX_TEXT = 200_000
+
+    def check(self, req: ScanRequest, resp: ScanResponse, ctx: CheckContext) -> CheckResult:
+        if not self.enabled:
+            return self.skip()
+
+        text = _body_text(resp, self.MAX_TEXT)
+        if not text.strip():
+            return self.ok()
+
+        hits: list[tuple[str, str]] = []
+        for label, pattern in _ERRH_STRONG_PATTERNS:
+            match = pattern.search(text)
+            if match:
+                hits.append((label, match.group(0)[:80]))
+                if len(hits) >= self.MAX_HITS:
+                    break
+
+        if not hits and resp.status_code and resp.status_code >= 400:
+            for label, pattern in _ERRH_WEAK_PATTERNS:
+                match = pattern.search(text)
+                if match:
+                    hits.append((label, match.group(0)[:80]))
+                    if len(hits) >= self.MAX_HITS:
+                        break
+
+        if not hits:
+            return self.ok()
+
+        evidence = "Verbose error page: " + "; ".join(
+            f"{label} ('{snippet}')" for label, snippet in hits
+        )
+        return self.found(self.make_finding(
+            evidence, req, resp, ctx,
+            recommendation="Показывай пользователю общее сообщение об ошибке; stack traces, "
+                           "DEBUG и SQL-ошибки — только в серверный лог (production).",
+            cwe=self.cwe,
+        ))
+
+
+# ══════════════════════════════════════════════════════════════════
+#  9. Session token in URL — WSTG-SESS-04
+# ══════════════════════════════════════════════════════════════════
+
+# Имена query-параметров, которые обычно несут session/token.
+_SESSION_PARAM_NAMES = frozenset({
+    "phpsessid", "jsessionid", "asp.net_sessionid", "sessionid", "session_id",
+    "sid", "session", "access_token", "jwt", "token", "auth_token",
+    "id_token", "refresh_token",
+})
+# ;jsessionid=... / ;phpsessid=... в path.
+_SESSION_PATH_RE = re.compile(
+    r";(jsessionid|phpsessid|sessionid|session_id|sid)=([^/?#;&]{16,})",
+    re.IGNORECASE,
+)
+MIN_TOKEN_LEN = 16
+
+
+def _mask_secret(value: str) -> str:
+    """Маскирует значение токена для evidence (секрет не утекает в отчёт)."""
+    value = value or ""
+    if len(value) <= 6:
+        return "***"
+    return value[:4] + "***" + value[-2:]
+
+
+def _session_tokens_in_url(url: str) -> list[tuple[str, str]]:
+    """[(источник, маскированный параметр)] из query и path URL."""
+    hits: list[tuple[str, str]] = []
+    try:
+        parsed = urlparse(url or "")
+    except Exception:
+        return hits
+    for name, value in parse_qsl(parsed.query or "", keep_blank_values=True):
+        if name.lower() in _SESSION_PARAM_NAMES and len(value) >= MIN_TOKEN_LEN:
+            hits.append(("query", f"{name}={_mask_secret(value)}"))
+    # ;jsessionid=... может попасть в parsed.params (urlparse отделяет их от path),
+    # поэтому ищем по всему URL — регэксп требует ';' перед именем токена.
+    for match in _SESSION_PATH_RE.finditer(url or ""):
+        hits.append(("path", f";{match.group(1)}={_mask_secret(match.group(2))}"))
+    return hits
+
+
+class SessionInUrlCheck(BaseCheck):
+    """Session-токены в URL query/path, Referer и Location-редиректе."""
+
+    check_id = "session_in_url"
+    vuln_type = "session_in_url"
+    category = VulnCategory.AUTH
+    severity = Severity.MEDIUM
+    name = "Session Token in URL"
+    description = "WSTG-SESS-04: session-токены в query/path/Referer/Location."
+    cwe = "CWE-598"
+    passive = True
+    requires_payload = False
+
+    MAX_HITS = 3
+
+    def check(self, req: ScanRequest, resp: ScanResponse, ctx: CheckContext) -> CheckResult:
+        if not self.enabled:
+            return self.skip()
+
+        hits: list[tuple[str, str]] = list(
+            _session_tokens_in_url(req.url or "")
+        )
+        referer = _get_header(req.headers, "referer").strip()
+        if referer and len(hits) < self.MAX_HITS:
+            for _source, rendered in _session_tokens_in_url(referer):
+                hits.append(("referer", rendered))
+                break
+
+        # Location-редирект с session-токеном в URL (часто: login → ?PHPSESSID=...).
+        location = _get_header(resp.headers, "location").strip()
+        if location and len(hits) < self.MAX_HITS:
+            for _source, rendered in _session_tokens_in_url(location):
+                hits.append(("Location", rendered))
+                break
+
+        if not hits:
+            return self.ok()
+
+        evidence = "Session token в URL: " + "; ".join(
+            f"{rendered} ({source})" for source, rendered in hits[: self.MAX_HITS]
+        )
+        return self.found(self.make_finding(
+            evidence, req, resp, ctx,
+            recommendation="Не передавай session-id/токены в URL (query/path/Referer) — "
+                           "они попадают в логи, кэши, историю и Referer. Используй "
+                           "HttpOnly-cookie или заголовок Authorization.",
+            cwe=self.cwe,
+        ))
+
+
+# ══════════════════════════════════════════════════════════════════
 #  Экспорт
 # ══════════════════════════════════════════════════════════════════
 
@@ -570,4 +861,7 @@ ALL_EXTRA_PASSIVE_CHECKS: list[type[BaseCheck]] = [
     CacheControlCheck,
     InsecureLoginCheck,
     BrowserStorageCheck,
+    ServerFingerprintCheck,
+    ErrorHandlingCheck,
+    SessionInUrlCheck,
 ]

@@ -8,6 +8,7 @@ templating.py — Разбор и мутация raw HTTP-запросов.
       - query-параметры
       - application/x-www-form-urlencoded body
       - JSON body
+      - raw body (XML/SOAP/PHP-serialized/прочие сырые тела) — для XXE/deserialization
       - заголовки (кастомные)
 """
 
@@ -273,6 +274,76 @@ def mutate_body_json(req: ParsedRequest) -> list[MutatedRequest]:
     return results
 
 
+#: Content-Type, для которых сырое тело — единственный осмысленный тип мутации
+#: (XXE / deserialization payload'ы — это ЦЕЛИКОМ документ/объект, а не значение
+#: отдельного параметра).
+RAW_BODY_CT_MARKERS: tuple[str, ...] = (
+    "xml", "soap", "serialized", "octet-stream", "graphql", "protobuf",
+)
+
+
+def _is_form_like_body(req: ParsedRequest) -> bool:
+    """Похоже ли тело на urlencoded-форму (для отсечения body_raw)."""
+    ct = req.content_type.lower()
+    if "application/x-www-form-urlencoded" in ct:
+        return True
+    body = req.body or b""
+    if not body:
+        return False
+    # ВАЖНО: XML с атрибутами (`<a b="c">`) тоже содержит '=', поэтому XML/SOAP
+    # проверяется вызывающим кодом ДО этого эвристического признака.
+    return bool(re.search(rb"[^=&]+=", body))
+
+
+def _is_json_like_body(req: ParsedRequest) -> bool:
+    """Похоже ли тело на JSON (CT содержит json ИЛИ начинается с { / [)."""
+    if "json" in req.content_type.lower():
+        return True
+    return (req.body or b"").lstrip()[:1] in (b"{", b"[")
+
+
+def mutate_body_raw(req: ParsedRequest) -> list[MutatedRequest]:
+    """Мутация «всё тело целиком заменяется на PLACEHOLDER».
+
+    Нужна для XXE и deserialization: их payload'ы — целые XML-документы /
+    serialized-объекты, которые нельзя подставить в значение query/form/json
+    параметра. Создаёт ровно одну мутацию с ``mutation_point="body_raw"`` и
+    ``original_param="body"`` (имя используется GUI-фильтром only_params).
+
+    Не применяется к:
+      • пустому телу;
+      • form-телам (application/x-www-form-urlencoded / похоже на форму);
+      • JSON-телам (Content-Type json или тело начинается с '{'/'[').
+    XML/SOAP-тела мутируются как raw даже если содержат '=' в атрибутах.
+    """
+    if not req.body:
+        return []
+    ct = req.content_type.lower()
+    is_xml = ("xml" in ct) or ("soap" in ct)
+    if not is_xml:
+        if "application/x-www-form-urlencoded" in ct:
+            return []
+        if _is_json_like_body(req):
+            return []
+        if _is_form_like_body(req):
+            return []
+
+    headers = {k: v for k, v in req.headers.items() if k.lower() != "content-length"}
+    new_body = PLACEHOLDER.encode("utf-8")
+    raw = build_raw_http(req.method, req.url, headers, new_body)
+    return [
+        MutatedRequest(
+            method=req.method,
+            url=req.url,
+            headers=headers,
+            body=new_body,
+            mutation_point="body_raw",
+            original_param="body",
+            raw_http=raw,
+        )
+    ]
+
+
 def _deep_replace(obj, path: str, value):
     """Возвращает глубокую копию obj с заменой по пути path."""
     parts = _split_path(path)
@@ -355,8 +426,15 @@ def get_mutations(
     do_body_form: bool = True,
     do_body_json: bool = True,
     do_headers: bool = False,
+    do_body_raw: bool = True,
 ) -> list[MutatedRequest]:
-    """Возвращает все мутации по выбранным точкам."""
+    """Возвращает все мутации по выбранным точкам.
+
+    ``do_body_raw`` (default True) добавляет raw-мутацию для XML/SOAP/сырых
+    тел; движок разрешает её только для XXE/deserialization (см.
+    scanner_core.build_scan_tasks). Параметр добавлен последним с дефолтом —
+    старые вызовы работают как раньше.
+    """
     result = []
     if do_query:
         result.extend(mutate_query_params(req))
@@ -366,6 +444,8 @@ def get_mutations(
         result.extend(mutate_body_json(req))
     if do_headers:
         result.extend(mutate_headers(req))
+    if do_body_raw:
+        result.extend(mutate_body_raw(req))
     return result
 
 

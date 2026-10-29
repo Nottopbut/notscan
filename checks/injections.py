@@ -401,14 +401,15 @@ class NoSQLInjectionCheck(BaseCheck):
 #  7. XXE — XML External Entity
 # ══════════════════════════════════════════════════════════════════
 
+# XXE без OOB доказывается только раскрытием содержимого файла; ошибки парсера
+# и эхо payload'а — не доказательство (см. FP на debug-страницах/эхе).
 XXE_INDICATORS = [
     r"root:x:0:0",              # /etc/passwd leaked
+    r"root:!:",                 # macOS /etc/passwd
+    r"daemon:x:",               # /etc/passwd
     r"\[boot loader\]",         # win.ini
-    r"file:///",                # file URI reflected
-    r"<!entity",                # entity declaration echoed
-    r"doctype.*system",
-    r"external entity",
-    r"xmlreader.*error",
+    r"for 16-bit app support",  # win.ini
+    r"\[fonts\]",               # win.ini
 ]
 
 XXE_PAYLOADS_SIGNATURES = ["<!DOCTYPE", "<!ENTITY", "SYSTEM", "file:///"]
@@ -507,12 +508,9 @@ class DeserializationCheck(BaseCheck):
                     recommendation="Never deserialize untrusted data. Use safe formats (JSON).",
                 ))
 
-        # If server returned 500 with serialized payload — suspicious
-        if resp.status_code == 500 and has_serial_sig:
-            return self.found(self.make_finding(
-                "Server returned 500 when receiving serialized payload — possible deserialization issue",
-                req, resp, ctx, severity=Severity.MEDIUM,
-            ))
+        # Голый 500 на сериализованный payload — слишком слабый сигнал (FP:
+        # malformed XML/JSON тоже даёт 500). Флагаем только реальные
+        # deserialization-маркеры выше.
         return self.ok()
 
 

@@ -108,6 +108,14 @@ except Exception:  # pragma: no cover
     _RUN_CHECKS_HAS_BASELINE = False
 
 
+# Чеки, для которых разрешена raw-мутация тела (mutation_point="body_raw"):
+# их payload'ы — целые документы/объекты (XML для XXE, serialized-объект для
+# deserialization), а не значения отдельных параметров.
+# Для остальных чеков body_raw запрещён явно (не плодим шум), независимо от
+# значения planner_enabled.
+BODY_RAW_CHECKS = frozenset({"xxe", "deserialization"})
+
+
 # Проверки, к которым применяется tamper/WAF-bypass кодирование:
 # только серверные инъекционные. XSS/passive/редиректы — не кодируем.
 TAMPERABLE_CHECKS = frozenset({
@@ -710,6 +718,8 @@ def build_scan_tasks(
     contracts: dict[tuple[str, str], dict] | None = None,
     tamper_modes: list[str] | None = None,
     csrf_token_provider: Callable[[], str | None] | None = None,
+    do_body_raw: bool = True,
+    only_params: list[str] | None = None,
 ) -> list[ScanTask]:
     """
     Для каждого history_id × check_type × mutation_point × payload
@@ -724,6 +734,15 @@ def build_scan_tasks(
     csrf_token_provider: вызывается ОДИН раз на history record; если вернул
         токен — он патчится в каждую мутацию (templating.patch_csrf_token) до
         генерации задач, а мутации самого CSRF-поля не отправляются.
+
+    do_body_raw: включить raw-мутацию тела (XML/SOAP/PHP-serialized/сырые
+        тела). Такие задачи создаются ТОЛЬКО для BODY_RAW_CHECKS (xxe при
+        XML/SOAP Content-Type и deserialization), для остальных чеков
+        отсекаются.
+
+    only_params: если задан список имён — оставляем только мутации, у которых
+        ``mutation.original_param`` входит в список (case-insensitive). Для
+        raw-тела имя — "body". Пустой/None = без фильтра.
     """
     tasks: list[ScanTask] = []
 
@@ -751,7 +770,7 @@ def build_scan_tasks(
 
         # json-like params: prefer NoSQLi/deserialization, avoid open_redirect
         if pt == "json" and ct in ("nosql_injection", "deserialization"):
-            return mp in ("body_json", "body_form", "query")
+            return mp in ("body_json", "body_form", "query", "body_raw")
         if pt == "json" and ct in ("open_redirect",):
             return False
 
@@ -759,9 +778,12 @@ def build_scan_tasks(
         if pt == "email" and ct in ("ssrf", "open_redirect"):
             return False
 
-        # xml-related: allow xxe only if body and content-type hints xml
+        # xml-related: allow xxe only if body and content-type hints xml;
+        # raw body (целый XML-документ) — основной путь для XXE.
         if ct == "xxe":
-            return ("xml" in (content_type or "")) and (mp in ("body_form", "body_json"))
+            return ("xml" in (content_type or "")) and (
+                mp in ("body_form", "body_json", "body_raw")
+            )
 
         return True
 
@@ -802,7 +824,28 @@ def build_scan_tasks(
             do_body_form=do_body_form,
             do_body_json=do_body_json,
             do_headers=do_headers,
+            do_body_raw=do_body_raw,
         )
+
+        # only_params: GUI-выбор «в какой параметр инъектить». Для raw-тела
+        # original_param == "body". Сравнение case-insensitive.
+        if only_params:
+            _allowed_params = {
+                str(_p).strip().lower()
+                for _p in only_params
+                if str(_p or "").strip()
+            }
+            if _allowed_params:
+                _before = len(mutations)
+                mutations = [
+                    _m for _m in mutations
+                    if str(getattr(_m, "original_param", "") or "").strip().lower()
+                    in _allowed_params
+                ]
+                logger.info(
+                    "only_params=%s: %d/%d mutations kept for history_id=%s",
+                    sorted(_allowed_params), len(mutations), _before, history_id,
+                )
 
         if not mutations:
             logger.info("No mutation points for history_id=%s, skipping", history_id)
@@ -881,6 +924,16 @@ def build_scan_tasks(
                 tamper_for_check = [str(m) for m in tamper_modes if m]
 
             for mutation in mutations:
+                # ── body_raw reachability gate (FIX: XXE/deserialization) ──
+                # raw-мутация тела разрешена только BODY_RAW_CHECKS: для XXE —
+                # при XML/SOAP Content-Type, для deserialization — всегда.
+                # Остальным чекам body_raw задач не создаёт (даже planner_enabled=False).
+                if (mutation.mutation_point or "").lower() == "body_raw":
+                    if check_type_lower not in BODY_RAW_CHECKS:
+                        continue
+                    if check_type_lower == "xxe" and "xml" not in content_type:
+                        continue
+
                 contract = None
                 if contracts:
                     try:
@@ -911,7 +964,7 @@ def build_scan_tasks(
                     # XXE only when content-type suggests xml and mutation is body
                     if ct == "xxe" and "xml" not in content_type:
                         continue
-                    if ct == "xxe" and mp not in ("body_form", "body_json"):
+                    if ct == "xxe" and mp not in ("body_form", "body_json", "body_raw"):
                         continue
 
                     # SQLi/CMDi/SSTI: mostly query or body, rarely headers
@@ -1464,12 +1517,18 @@ def match_path_traversal(payload: str, response_text: str, status_code: int = 0)
 
 
 def match_xxe(payload: str, response_text: str, status_code: int = 0) -> Optional[str]:
-    ev = _sig_match(response_text, XXE_ERROR_SIGS, "XXE")
-    if ev:
-        return ev
-    # Check for file content disclosure (common XXE target)
-    for sig in ["root:x:0", "root:!:", "[extensions]", "<title>404", "daemon:x"]:
-        if sig.lower() in response_text.lower():
+    """XXE без OOB: доказуемо только раскрытие файла.
+
+    Парсер-ошибки/эхо payload'а («entity», «file:///», «doctype … system»)
+    НЕ являются доказательством XXE: так выглядит и заблокированная попытка,
+    и обычный echo в debug-странице. Поэтому матчим только содержимое файлов
+    (с OOB-коллаборатором blind-XXE появится отдельно).
+    """
+    text = response_text or ""
+    low = text.lower()
+    for sig in ("root:x:0", "root:!:", "daemon:x:", "[boot loader]",
+                "for 16-bit app support", "[extensions]", "[fonts]"):
+        if sig in low:
             return f"XXE: file content disclosed '{sig}'"
     return None
 

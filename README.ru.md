@@ -26,9 +26,9 @@
   JSON-телам и (опционально) заголовкам. Асинхронный движок (`asyncio` + `httpx.AsyncClient`),
   настраиваемая конкурентность, RPS-лимит, scope-guard; редиректы **не сопровождаются**
   (payload-редирект не должен превращать сканер в источник внешних запросов).
-- **Каталог WSTG-чеков (39)** — единый источник (`checks/catalog.py`) для вкладки
+- **Каталог WSTG-чеков (43)** — единый источник (`checks/catalog.py`) для вкладки
   Checks/WSTG, бейджей конфигурации скана, WSTG-карты находок и payload-файлов:
-  **17 active + 16 passive + 6 probe**. WSTG-ID сверены с OWASP WSTG v4.2 и checklist v5
+  **17 active + 19 passive + 7 probe**. WSTG-ID сверены с OWASP WSTG v4.2 и checklist v5
   (тесты, которых нет в v4.2, помечены `(v5)`). Полная таблица —
   [`docs/CHECKS.md`](docs/CHECKS.md).
   - Active: SQLi (error-based, time-based и boolean-based blind по разнице кодов/тел
@@ -53,6 +53,13 @@
   (baseline / benign / suspicious replay), пагинация результатов.
 - **Отчёты** — Markdown, JSON, HTML, SARIF, DOCX; по умолчанию выгружается полный набор
   результатов (без молчаливой обрезки).
+- **Raw/XML mutation-тип** — для XML/SOAP/PHP-serialized и прочих «сырых» тел добавлена
+  мутация `body_raw`, поэтому чеки **XXE** и **insecure deserialization** реально
+  генерируют запросы (раньше были декларативными).
+- **Выбор цели инъекции** — в окне скана можно указать, какие заголовки проверяет
+  host-header injection (`inject_headers`), ограничить мутации конкретными
+  параметрами (`only_params`) и добавить extra-заголовки probe-чеков, например
+  `Cookie: PHPSESSID=...`, для проверок под авторизацией (`probe_extra_headers`).
 - **Payload-наборы** — ~3.6 тыс. payload'ов в 19 наборах с отдельными
   **WAF-bypass-вариантами** (обфускация регистром/комментариями, encoding/HTML-entity/
   unicode-трюки, IP-представления) в каждом инъекционном наборе (включая true/false
@@ -92,7 +99,7 @@ python notscan.py
    нажми **＋ Add to Scan list**, затем **▶ Run Scan**.
 4. В окне конфигурации выбери чеки (active/passive/probe), точки мутации и ROE-опции
    (конкурентность, RPS, scope allowlist, Safe Mode, tamper) → **Start Scan**.
-   **По умолчанию все чеки выключены** (в окне скана видно `0 / 39 checks enabled`):
+   **По умолчанию все чеки выключены** (в окне скана видно `0 / 43 checks enabled`):
    включи нужные или нажми **All ON**; бейджи показывают состояние ☐/☑.
 5. Смотри находки в **Scan Results** (severity, evidence, сырой HTTP, diff, confirm-flow)
    и экспортируй отчёт (MD / JSON / HTML / SARIF / DOCX).

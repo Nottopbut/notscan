@@ -71,15 +71,16 @@ inferred-контрактов: int/url/json/email/…).
 1. **Matcher-слой** (`scanner_core.match_*`) — быстрые сигнатурные проверки
    (SQL-ошибки, отражение XSS с контекстными правилами, заголовки CRLF, Location и т.д.),
    с baseline-suppress: если сигнал есть и в baseline-ответе, он подавляется.
-2. **Checks-пайплайн** (`checks/`) — 39 чеков из каталога:
+2. **Checks-пайплайн** (`checks/`) — 43 чека из каталога:
    - **active** (17): payload-проверки (SQLi error/time/blind, CMDi, SSTI, LDAP/XPath/NoSQL,
      XXE, deserialization, CRLF, SSRF, SSI, path traversal, reflected XSS, HTML injection,
      open redirect);
-   - **passive** (16): анализ ответов (info disclosure, headers/HSTS/CSP, cookies,
+   - **passive** (19): анализ ответов (info disclosure, fingerprint сервера/фреймворка,
+     verbose errors/stack traces, headers/HSTS/CSP, cookies, session-токены в URL,
      cache-control, креды по HTTP, browser storage, CSRF, JWT, clickjacking, file upload,
      DOM-XSS, IDOR и др.);
-   - **probe** (6): отдельные запросы (sensitive files/backups, metafiles, RIA-policy,
-     HTTP-методы/TRACE, admin/debug paths, CORS).
+   - **probe** (7): отдельные запросы (sensitive files/backups, metafiles, RIA-policy,
+     HTTP-методы/TRACE, admin/debug paths, CORS, host header injection);
 
 Полный каталог с WSTG-ID/CWE/severity — [`CHECKS.md`](CHECKS.md); источник —
 `checks/catalog.py`.

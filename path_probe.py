@@ -2,8 +2,14 @@
 path_probe.py — WSTG probe-чеки.
 
 Публичный API:
-    run_probe_scan(urls, probe_ids=None, log_cb=print) -> int
+    run_probe_scan(urls, probe_ids=None, log_cb=print, host_headers=None,
+                   extra_headers=None) -> int
     run_info_disclosure_scan(urls, log_cb=print) -> int   # legacy-обёртка
+
+`host_headers` — список заголовков для host-header-injection probe (None/пусто →
+дефолт: Host, X-Forwarded-Host, X-Host, Forwarded).
+`extra_headers` — дополнительные заголовки probe-клиента (например Cookie/Authorization
+для аутентифицированных страниц): [(name, value), ...]; None = без них.
 
 Probe-чеки (kind="probe" в checks/catalog.py, без payload-файлов):
   • sensitive_files       — WSTG-CONF-03/CONF-04: .env, .git/config, бэкапы
@@ -17,6 +23,10 @@ Probe-чеки (kind="probe" в checks/catalog.py, без payload-файлов):
                           200, PUT/DELETE на уникальном пути → 2xx/3xx;
   • cors                  — WSTG-CLNT-07: отражённый ACAO + Allow-Credentials:true
                             (или ACAO "*" + credentials);
+  • host_header_injection — WSTG-INPV-17 (v5: WSTG-INJT-17): Host/X-Forwarded-Host/
+                            X-Host/Forwarded с токеном evil-<rand>.notscan.invalid
+                            отражается в body/Location/absolute-URL; пробуются пути
+                            из scan-list (не статика) + корень хоста, метод GET;
   • info_disclosure_paths — legacy WSTG-CONF-05 (actuator/etcd/swagger/metrics).
 
 Каждая находка пишется в БД: scan_results (check_type=probe_id) +
@@ -167,7 +177,69 @@ PROBE_IDS: tuple[str, ...] = (
     "http_methods",
     "cors",
     "info_disclosure_paths",
+    "host_header_injection",
 )
+
+# Заголовки, подменяемые в host-header-injection probe (default; GUI может
+# передать свой список через run_probe_scan(host_headers=...)).
+DEFAULT_HOST_HEADERS: tuple[str, ...] = (
+    "Host",
+    "X-Forwarded-Host",
+    "X-Host",
+    "Forwarded",
+)
+_HOST_HEADER_TOKEN = f"evil-{{rand}}.notscan.invalid"
+_HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$")
+
+
+def _normalize_extra_headers(
+    extra_headers: Optional[Iterable[tuple[str, str]]],
+) -> dict[str, str]:
+    """Нормализует extra_headers probe-клиента (Cookie-дубликаты — через '; ').
+
+    • невалидные имена/значения (переводы строк) отбрасываются;
+    • одинаковые имена (case-insensitive) объединяются: Cookie → '; ', остальные → ', ';
+    • имена сохраняются в исходном регистре первого вхождения.
+    """
+    headers: dict[str, str] = {}
+    lowered: dict[str, str] = {}
+    for item in extra_headers or []:
+        try:
+            name, value = item
+        except (TypeError, ValueError):
+            continue
+        name = str(name or "").strip()
+        if not name or not _HEADER_NAME_RE.match(name):
+            continue
+        value = str(value or "").replace("\r", "").replace("\n", "").strip()
+        if not value:
+            continue
+        key_low = name.lower()
+        if key_low in lowered:
+            real_name = lowered[key_low]
+            sep = "; " if key_low == "cookie" else ", "
+            headers[real_name] = f"{headers[real_name]}{sep}{value}"
+        else:
+            lowered[key_low] = name
+            headers[name] = value
+    return headers
+
+
+def normalize_host_headers(host_headers: Optional[Iterable[str]]) -> list[str]:
+    """Нормализует список заголовков для host-header probe (default при пустоте)."""
+    if not host_headers:
+        return list(DEFAULT_HOST_HEADERS)
+    normalized: list[str] = []
+    for raw in host_headers:
+        name = str(raw or "").strip()
+        if not name or not _HEADER_NAME_RE.match(name):
+            continue
+        if name.lower() in {h.lower() for h in normalized}:
+            continue
+        normalized.append(name)
+        if len(normalized) >= 10:
+            break
+    return normalized or list(DEFAULT_HOST_HEADERS)
 
 # Severity для scan_meta (грубая, для триажа в GUI).
 _PROBE_SEVERITY = {
@@ -177,6 +249,7 @@ _PROBE_SEVERITY = {
     "http_methods": "MEDIUM",
     "cors": "HIGH",
     "info_disclosure_paths": "MEDIUM",
+    "host_header_injection": "HIGH",
 }
 
 _USER_AGENT = "notscan-path-probe/2.0 (+WSTG)"
@@ -259,12 +332,18 @@ class _ProbeContext:
 
     def __init__(self, client: httpx.Client, base_urls: list[str],
                  scan_urls: Optional[list[str]] = None,
+                 host_headers: Optional[Iterable[str]] = None,
+                 extra_headers: Optional[Iterable[tuple[str, str]]] = None,
                  log_cb: Callable[[str], None] = print):
         self.client = client
         self.base_urls = base_urls
         # Полные URL из scan-list (для проверок, привязанных к конкретному пути,
         # например CORS: Origin отправляем и на сам сканируемый эндпоинт).
         self.scan_urls = list(scan_urls or [])
+        # Заголовки для host-header-injection probe (None → DEFAULT_HOST_HEADERS).
+        self.host_headers = normalize_host_headers(host_headers)
+        # Доп. заголовки probe-клиента (Cookie/Authorization для auth-страниц).
+        self.extra_headers = _normalize_extra_headers(extra_headers)
         self.log_cb = log_cb
         self._baselines: dict[str, str] = {}
         self.found = 0
@@ -550,11 +629,11 @@ def _header_ci(headers, name: str) -> str:
     return ""
 
 
-def _cors_candidate_urls(ctx: _ProbeContext) -> list[str]:
-    """URL'ы для CORS-пробы: сами сканируемые эндпоинты + корень каждого хоста.
+def _path_candidate_urls(ctx: _ProbeContext, cap: int = 25) -> list[str]:
+    """URL'ы для path/route-зависимых проб: сканируемые эндпоинты + корень хоста.
 
-    CORS-политика может отличаться per-route, поэтому Origin отправляется и на
-    конкретные URL из scan-list (без фрагмента), и на base-URL. Ограничиваем
+    CORS/host-header политика может отличаться per-route, поэтому проба идёт и
+    на конкретные URL из scan-list (без фрагмента), и на base-URL. Ограничиваем
     число кандидатов, чтобы скан-list из сотен URL не раздувал probe.
     """
     candidates: list[str] = []
@@ -576,16 +655,74 @@ def _cors_candidate_urls(ctx: _ProbeContext) -> list[str]:
 
     for url in ctx.scan_urls:
         _add(url)
-        if len(candidates) >= 25:
+        if len(candidates) >= cap:
             break
     for base in ctx.base_urls:
         _add(base + "/")
     return candidates
 
 
+def _cors_candidate_urls(ctx: _ProbeContext) -> list[str]:
+    """Backward-compatible alias для CORS-пробы."""
+    return _path_candidate_urls(ctx)
+
+
+# Статика: host-header пробовать бессмысленно (и шумно) — отфильтровываем.
+_STATIC_PATH_EXTENSIONS = frozenset({
+    ".css", ".js", ".mjs", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg",
+    ".ico", ".webp", ".avif", ".bmp", ".woff", ".woff2", ".ttf", ".eot",
+    ".otf", ".mp4", ".webm", ".mp3", ".pdf", ".swf", ".wasm",
+})
+
+
+def _is_static_path(path: str) -> bool:
+    low = (path or "").lower().rstrip("/")
+    return any(low.endswith(ext) for ext in _STATIC_PATH_EXTENSIONS)
+
+
+def _host_header_candidate_urls(ctx: _ProbeContext, cap: int = 10) -> list[str]:
+    """URL'ы для host-header probe: пути из scan-list (не статика) + корни хостов.
+
+    bWAPP-кейс: отражение Host есть только в `hostheader_1.php` (при Cookie), а
+    base-URL `/` отдаёт редирект без отражения — поэтому пробуем конкретные пути
+    из scan-list. Метод всегда GET (даже если исходный запрос был POST); query
+    сохраняем. Ограничение `cap` — чтобы не раздувать probe.
+    """
+    candidates: list[str] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(url: str) -> bool:
+        parsed = urlparse(url or "")
+        if not parsed.scheme or not parsed.netloc:
+            return False
+        path = parsed.path or "/"
+        key = (parsed.netloc.lower(), path.lower())
+        if key in seen:
+            return False
+        seen.add(key)
+        candidates.append(url.split("#", 1)[0])
+        return True
+
+    for url in ctx.scan_urls:
+        parsed = urlparse(url or "")
+        if not parsed.scheme or not parsed.netloc:
+            continue
+        path = parsed.path or "/"
+        if path in ("", "/") or _is_static_path(path):
+            continue
+        if _add(url) and len(candidates) >= cap:
+            break
+    # Фолбэк: корень каждого хоста (часть целей отражает Host и там).
+    for base in ctx.base_urls:
+        if len(candidates) >= cap:
+            break
+        _add(base + "/")
+    return candidates
+
+
 def _probe_cors(ctx: _ProbeContext) -> int:
     tested_bases: set[str] = set()
-    for url in _cors_candidate_urls(ctx):
+    for url in _path_candidate_urls(ctx):
         origin = f"https://evil-{_rand_token(10)}.com"
         resp = ctx.request("GET", url, headers={"Origin": origin})
         if resp is None:
@@ -672,6 +809,74 @@ def _probe_info_disclosure_paths(ctx: _ProbeContext) -> int:
     return ctx.found
 
 
+# ══════════════════════════════════════════════════════════════════
+#  Probe 7/7: host_header_injection — WSTG-INPV-17 / INJT-17 (v5)
+# ══════════════════════════════════════════════════════════════════
+
+_ABS_URL_TOKEN_RE_TMPL = r"(?:https?:)?//{token}"
+
+
+def _probe_host_header_injection(ctx: _ProbeContext) -> int:
+    """Host/X-Forwarded-Host/... → отражение токена в body/Location/absolute-URL.
+
+    Один finding на host (дедуп по первому сработавшему заголовку).
+    """
+    found_hosts: set[str] = set()
+    for candidate in _host_header_candidate_urls(ctx):
+        base = _base_url(candidate)
+        if not base or base in found_hosts:
+            continue
+        baseline = ctx.baseline_body(base)
+        token = _HOST_HEADER_TOKEN.format(rand=_rand_token(10))
+        abs_url_re = re.compile(_ABS_URL_TOKEN_RE_TMPL.format(
+            token=re.escape(token)), re.IGNORECASE)
+        for header_name in ctx.host_headers:
+            resp = ctx.request("GET", candidate, headers={header_name: token})
+            if resp is None:
+                continue
+            body = resp.text or ""
+            # WAF/фильтр-заглушка и soft-404 (SPA catch-all) — не отражение.
+            if _looks_like_denial(resp, body):
+                continue
+            if _is_soft_404(body, baseline):
+                continue
+
+            location = _header_ci(resp.headers, "location").strip()
+            where: list[str] = []
+            if token in body:
+                where.append("body")
+            if token in location:
+                where.append("Location")
+            if abs_url_re.search(body):
+                where.append("absolute URL")
+            if not where:
+                continue
+
+            parsed_candidate = urlparse(candidate)
+            ctx.record(
+                probe_id="host_header_injection",
+                url=candidate,
+                method="GET",
+                path=parsed_candidate.path or "/",
+                status_code=resp.status_code,
+                evidence=(f"[WSTG-INPV-17] Заголовок '{header_name}' с токеном "
+                          f"'{token}' отражается в {', '.join(where)} на "
+                          f"{parsed_candidate.path or '/'} — возможна host-header "
+                          f"injection (password-reset/cache poisoning)"),
+                severity="HIGH",
+                confidence=0.75,
+                exploitability=0.55,
+                resp_text=body,
+                resp_headers=dict(resp.headers),
+                raw_request=(f"GET {parsed_candidate.path or '/'} HTTP/1.1\n"
+                             f"Host: {parsed_candidate.netloc}\n"
+                             f"{header_name}: {token}\n\n"),
+            )
+            found_hosts.add(base)   # 1 finding на host
+            break
+    return ctx.found
+
+
 _PROBE_HANDLERS: dict[str, Callable[[_ProbeContext], int]] = {
     "sensitive_files": _probe_sensitive_files,
     "metafiles": _probe_metafiles,
@@ -679,6 +884,7 @@ _PROBE_HANDLERS: dict[str, Callable[[_ProbeContext], int]] = {
     "http_methods": _probe_http_methods,
     "cors": _probe_cors,
     "info_disclosure_paths": _probe_info_disclosure_paths,
+    "host_header_injection": _probe_host_header_injection,
 }
 
 
@@ -690,6 +896,8 @@ def run_probe_scan(
     urls: list[str],
     probe_ids: Optional[Iterable[str]] = None,
     log_cb: Callable[[str], None] = print,
+    host_headers: Optional[Iterable[str]] = None,
+    extra_headers: Optional[Iterable[tuple[str, str]]] = None,
 ) -> int:
     """
     Запустить probe-чеки по base-URL сканируемых хостов.
@@ -698,6 +906,10 @@ def run_probe_scan(
         urls: URL из scan-list (используется только scheme://host[:port]).
         probe_ids: какие probe-чеки запускать (по умолчанию — все PROBE_IDS).
         log_cb: callback для лога GUI.
+        host_headers: заголовки для host-header-injection probe; None/пусто →
+            DEFAULT_HOST_HEADERS (Host, X-Forwarded-Host, X-Host, Forwarded).
+        extra_headers: дополнительные заголовки для всех probe-запросов
+            (например [("Cookie", "PHPSESSID=...")]) — probe на auth-страницах.
 
     Returns:
         Количество находок (записей в scan_results).
@@ -720,15 +932,22 @@ def run_probe_scan(
             return 0
 
     log_cb(f"[PROBE] Starting {', '.join(selected)} for {len(base_urls)} host(s)")
+    client_headers: dict[str, str] = {"User-Agent": _USER_AGENT}
+    extra = _normalize_extra_headers(extra_headers)
+    for name, value in extra.items():
+        if name.lower() == "user-agent":
+            continue  # не перетираем UA probe-клиента
+        client_headers[name] = value
     client = httpx.Client(
         verify=False,
         timeout=10.0,
         follow_redirects=False,
-        headers={"User-Agent": _USER_AGENT},
+        headers=client_headers,
     )
     try:
         ctx = _ProbeContext(client, base_urls, scan_urls=list(urls or []),
-                            log_cb=log_cb)
+                            host_headers=host_headers,
+                            extra_headers=extra, log_cb=log_cb)
         for probe_id in selected:
             try:
                 _PROBE_HANDLERS[probe_id](ctx)

@@ -68,7 +68,7 @@ python notscan.py
 4. В окне конфигурации: чеки (active/passive/probe), точки мутации (query/form/json/headers),
    Safe Mode, tamper, Smart planner, ROE (конкурентность, RPS, scope allowlist,
    block private/metadata) → **Start Scan**. **Все чеки по умолчанию выключены**
-   (`0 / 39 checks enabled`): включи нужные или нажми **All ON**; бейджи показывают ☐/☑.
+   (`0 / 43 checks enabled`): включи нужные или нажми **All ON**; бейджи показывают ☐/☑.
 5. Результаты — во вкладке **Scan Results** (severity/confidence, evidence, raw HTTP, diff,
    confirm-flow, пагинация). Экспорт: **Export MD / JSON / HTML / SARIF / DOCX**
    (выгружается полный набор результатов).

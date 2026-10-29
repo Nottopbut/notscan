@@ -93,6 +93,22 @@ CHECK_CATALOG: tuple[CheckDef, ...] = (
         "/robots.txt, /sitemap.xml, /security.txt, /.well-known/security.txt, /humans.txt.",
         "probe",
     ),
+    CheckDef(
+        "server_fingerprint", "WSTG-INFO-02", "Web Server / Framework Fingerprint",
+        "Information", "LOW", "CWE-200",
+        "WSTG-INFO-02 Fingerprint Web Server: Server / X-Powered-By / X-AspNet-Version / "
+        "X-Generator / Via headers, framework cookies (PHPSESSID, JSESSIONID, …) and "
+        "<meta name=\"generator\">.",
+        "passive",
+    ),
+    CheckDef(
+        "errh", "WSTG-ERRH-01", "Verbose Error Handling / Stack Traces",
+        "Information", "MEDIUM", "CWE-209",
+        "WSTG-ERRH-01 Improper Error Handling (also WSTG-ERRH-02 Stack Traces): verbose "
+        "stack traces, PHP warnings/fatals, Django DEBUG, Whoops/Symfony, ASP.NET error "
+        "pages, SQL/ORM errors.",
+        "passive",
+    ),
 
     # ────────────────────────────── Config ───────────────────────────────
     CheckDef(
@@ -247,6 +263,14 @@ CHECK_CATALOG: tuple[CheckDef, ...] = (
         "processed server-side (SSI error or directive output).",
         "active", "ssi.txt",
     ),
+    CheckDef(
+        "host_header_injection", "WSTG-INPV-17", "Host Header Injection",
+        "Injection", "HIGH", "CWE-644",
+        "WSTG-INPV-17 Testing for Host Header Injection (v5: WSTG-INJT-17): "
+        "Host/X-Forwarded-Host/X-Host/Forwarded value reflected in body, Location or "
+        "absolute URLs.",
+        "probe",
+    ),
 
     # ─────────────────────────────── File ────────────────────────────────
     CheckDef(
@@ -328,6 +352,13 @@ CHECK_CATALOG: tuple[CheckDef, ...] = (
         "Session", "MEDIUM", "CWE-614",
         "WSTG-SESS-02 Testing for Cookies Attributes: Set-Cookie without Secure / "
         "HttpOnly / SameSite protection.",
+        "passive",
+    ),
+    CheckDef(
+        "session_in_url", "WSTG-SESS-04", "Session Token in URL",
+        "Session", "MEDIUM", "CWE-598",
+        "WSTG-SESS-04 Testing for Exposed Session Variables: session-like tokens in URL "
+        "query / path (;jsessionid=…), Referer header and Location redirects.",
         "passive",
     ),
 

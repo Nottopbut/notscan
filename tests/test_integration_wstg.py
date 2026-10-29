@@ -2,7 +2,7 @@
 tests/test_integration_wstg.py — QA волна 2: интеграция новых WSTG-чеков.
 
 Проверяется на локальной лабе (`tests/lab/`) и в headless-xvfb:
-  • каталог `checks/catalog.py` (39 чеков) ↔ payload-файлы ↔ GUI Checks/WSTG;
+  • каталог `checks/catalog.py` (43 чека) ↔ payload-файлы ↔ GUI Checks/WSTG;
   • новые active-чеки (ssi_injection, html_injection) через реальный движок
     (`build_scan_tasks → ScannerRunner → scan_results`) — TP на уязвимых
     эндпоинтах и **0 FP** на /search (html.escape) и /safe;
@@ -10,6 +10,8 @@ tests/test_integration_wstg.py — QA волна 2: интеграция нов�
     на реальных HTTP-ответах лабы через `run_checks_on_response(only_passive=True)`;
   • probe-чеки (`path_probe.run_probe_scan`: sensitive_files/metafiles/ria_policy/
     http_methods/cors) — находки с `detector="probe"` и 0 FP на «чистой» лабе;
+    host_header_injection проверяется unit-тестами (tests/test_wstg_checks.py) на
+    собственном ThreadingHTTPServer — лаба host-заголовки не отражает;
   • авто-жизненный цикл прокси: авто-старт при запуске App, освобождение порта
     после закрытия, fallback при занятом 8080, отсутствие кнопки Stop Proxy.
 
@@ -278,16 +280,16 @@ def _bindable(port: int, host: str = "127.0.0.1") -> bool:
 
 
 def test_catalog_complete_with_payload_files_and_matchers():
-    """39 чеков: уникальные id, active с payload-файлами, matcher'ы новых чеков."""
+    """43 чека: уникальные id, active с payload-файлами, matcher'ы новых чеков."""
     import checks.catalog as catalog
 
     defs = list(catalog.CHECK_CATALOG)
-    assert len(defs) == 39, f"ожидалось 39 чеков, в каталоге {len(defs)}"
+    assert len(defs) == 43, f"ожидалось 43 чека, в каталоге {len(defs)}"
     ids = [d.check_id for d in defs]
     assert len(set(ids)) == len(ids), "дубли check_id в каталоге"
 
     kinds = collections.Counter(d.kind for d in defs)
-    assert kinds["active"] == 17 and kinds["passive"] == 16 and kinds["probe"] == 6, kinds
+    assert kinds["active"] == 17 and kinds["passive"] == 19 and kinds["probe"] == 7, kinds
 
     # Все active-чеки имеют payload-файл, который реально грузится.
     active_payloads: dict[str, list[str]] = {}
@@ -525,7 +527,7 @@ def test_gui_checks_tree_and_badges_match_catalog(tmp_path):
     data = _run_gui_script(project, _CATALOG_SCRIPT)
 
     assert data["uses_catalog"] is True, "GUI не использует checks/catalog.py"
-    assert data["catalog_count"] == len(catalog.CHECK_CATALOG) == 39
+    assert data["catalog_count"] == len(catalog.CHECK_CATALOG) == 43
     assert data["tree_ids"] == data["catalog_ids"], (
         f"строк GUI {len(data['tree_ids'])} != чеков каталога {len(data['catalog_ids'])}"
     )
@@ -535,7 +537,7 @@ def test_gui_checks_tree_and_badges_match_catalog(tmp_path):
     assert data["passive_helper"] == data["passive_ids"]
     assert data["probe_helper"] == data["probe_ids"]
     assert "info_disclosure_paths" in data["probe_ids"]
-    assert "39" in data["summary"], data["summary"]
+    assert "43" in data["summary"], data["summary"]
 
     # Кнопки Stop Proxy больше нет; Stop Scan — остаётся.
     assert data["has_stop_proxy"] is False, (

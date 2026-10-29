@@ -107,6 +107,15 @@ RECOMMENDATIONS = {
     "info_disclosure": "Скрывай версии, внутренние пути и stack traces в продакшене.",
     "outdated_libs": "Обнови устаревшие JS-библиотеки/фреймворки.",
     "third_party_scripts": "Ограничь сторонние скрипты (SRI, allowlist доменов).",
+    "server_fingerprint": "Скрой версии/технологии: убери заголовки Server/X-Powered-By/"
+                          "X-AspNet-Version, переименуй framework-cookie, удали meta generator.",
+    "errh": "Показывай пользователю общее сообщение об ошибке; stack traces, DEBUG-страницы "
+            "и SQL-ошибки — только в серверный лог (production).",
+    "session_in_url": "Не передавай session-id/токены в URL и Referer; используй "
+                      "HttpOnly-cookie (Secure, SameSite) или заголовок Authorization.",
+    "host_header_injection": "Валидируй Host/X-Forwarded-Host/Forwarded по allowlist и не "
+                             "используй их для генерации ссылок/редиректов (password-reset, "
+                             "cache poisoning).",
 }
 
 GENERIC_RECOMMENDATION = "Проверь вручную и устрани в соответствии с OWASP Testing Guide / CWE."

@@ -1,7 +1,7 @@
 # WSTG check catalog
 
-`notscan` ships **39 checks**: 17 active (mutation-based), 16 passive (response analysis)
-and 6 probe (dedicated HTTP requests). The catalog lives in [`checks/catalog.py`](../checks/catalog.py)
+`notscan` ships **43 checks**: 17 active (mutation-based), 19 passive (response analysis)
+and 7 probe (dedicated HTTP requests). The catalog lives in [`checks/catalog.py`](../checks/catalog.py)
 and is the single source of truth for the GUI (Checks/WSTG tab, scan-config badges), the
 WSTG mapping of findings (`checks/runner.py::WSTG_ID_MAP`) and payload files
 (`scanner_core.load_payloads`).
@@ -37,7 +37,7 @@ analyzed (signatures, reflection with context checks, delay measurement).
 | `html_injection` | WSTG-CLNT-03 | MEDIUM | CWE-80 | HTML Injection |
 | `open_redirect` | WSTG-CLNT-04 | MEDIUM | CWE-601 | Open Redirect |
 
-## Passive checks (16)
+## Passive checks (19)
 
 Analyze responses captured by the proxy (no additional payloads are sent by these checks).
 
@@ -59,8 +59,11 @@ Analyze responses captured by the proxy (no additional payloads are sent by thes
 | `cache_control` | WSTG-ATHN-06 | MEDIUM | CWE-525 | Cacheable sensitive responses |
 | `insecure_login` | WSTG-ATHN-01 | HIGH | CWE-319 | Credentials over cleartext channel |
 | `idor` | WSTG-ATHZ-04 | MEDIUM | CWE-639 | Insecure Direct Object Reference |
+| `server_fingerprint` | WSTG-INFO-02 | LOW | CWE-200 | Server / X-Powered-By / framework cookies / `<meta generator>` fingerprint |
+| `errh` | WSTG-ERRH-01 | MEDIUM | CWE-209 | Verbose errors / stack traces / DEBUG pages (also WSTG-ERRH-02) |
+| `session_in_url` | WSTG-SESS-04 | MEDIUM | CWE-598 | Session tokens in URL query/path, Referer, Location redirects |
 
-## Probe checks (6)
+## Probe checks (7)
 
 Dedicated requests issued against the target base URL (no mutation of captured requests).
 
@@ -72,6 +75,7 @@ Dedicated requests issued against the target base URL (no mutation of captured r
 | `sensitive_files` | WSTG-CONF-03 | HIGH | CWE-538 | Sensitive files / backups exposure |
 | `info_disclosure_paths` | WSTG-CONF-05 | MEDIUM | CWE-538 | Admin / debug interface exposure |
 | `cors` | WSTG-CLNT-07 | HIGH | CWE-942 | CORS misconfiguration (reflected origin + credentials) |
+| `host_header_injection` | WSTG-INPV-17 | HIGH | CWE-644 | Host / X-Forwarded-Host / X-Host / Forwarded reflection in body, Location or absolute URLs |
 
 ## Notes
 
@@ -82,11 +86,19 @@ Dedicated requests issued against the target base URL (no mutation of captured r
   `true_payload ||| false_payload`): the engine sends both requests (same endpoint/headers,
   only the payload differs) and treats a significant status/length/similarity difference as
   a finding only when the other response matches the baseline (no baseline → status-diff only).
+- **XXE / deserialization reachability:** raw/XML request bodies (XML, SOAP,
+  PHP-serialized, protobuf/octet-stream) get a dedicated `body_raw` mutation point
+  (whole body replaced by the payload); it is allowed only for `xxe` (XML/SOAP
+  Content-Type) and `deserialization` — other checks never generate `body_raw` tasks.
 - **Safe Mode** filters destructive payloads before task generation
   (`DESTRUCTIVE_PAYLOAD_PATTERNS` in `scanner_core.py`).
 - **Tamper/WAF-bypass** encoders (`url`, `unicode`, `hex`, `double-url`) apply only to
   server-side injection checks.
 - **Probes** perform real `OPTIONS`/`TRACE`/`PUT`/`DELETE` requests and file lookups: enable
   them only on targets you are authorized to test.
+- Probe client accepts `host_headers` (hosts to spoof for `host_header_injection`;
+  default `Host, X-Forwarded-Host, X-Host, Forwarded`) and `extra_headers`
+  (e.g. `Cookie`/`Authorization` for authenticated probe requests). GUI exposes them
+  as "Injection headers" / "Extra probe headers" settings.
 - Findings are stored with their WSTG ID (`scan_meta`/reports), so a report can be mapped
   directly to WSTG coverage.

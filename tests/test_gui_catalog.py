@@ -125,7 +125,7 @@ checkbox_vars_initial = {
     cid: bool(app._check_vars[cid].get()) for cid in cfg._check_widgets
 }
 
-# Регресс default-off: «All ON» включает все 39 чеков и все бейджи.
+# Регресс default-off: «All ON» включает все чеки каталога и все бейджи.
 cfg._set_all(True)
 app._load_checks_tree()
 app.update()
@@ -601,49 +601,56 @@ def test_gui_start_button_works_after_autostart_and_port_change(tmp_path):
 # ══════════════════════════════════════════════════════════════════
 
 def test_catalog_all_checks_default_off():
-    """Каталог и GUI-helpers: все 39 чеков по умолчанию выключены."""
+    """Каталог и GUI-helpers: все чеки каталога по умолчанию выключены."""
     import checks.catalog as catalog
     import notscan
 
-    assert len(catalog.CHECK_CATALOG) == 39
+    catalog_size = len(catalog.CHECK_CATALOG)
+    assert catalog_size >= 39, f"каталог подозрительно мал: {catalog_size}"
     assert all(d.enabled_default is False for d in catalog.CHECK_CATALOG), (
         "у некоторых чеков enabled_default=True — по умолчанию все должны быть OFF"
     )
     defs = notscan.check_var_defs()
-    assert len(defs) == 39
+    assert len(defs) == catalog_size
     assert [cid for cid, _on in defs] == [d.check_id for d in catalog.CHECK_CATALOG]
     assert not any(on for _cid, on in defs), "по умолчанию все чеки должны быть выключены"
 
 
 @pytest.mark.integration
 def test_gui_all_checks_off_by_default_and_all_on_regression(tmp_path):
-    """App+ScanConfig: 0/39 → All ON → 39/39 → All OFF → 0/39."""
+    """App+ScanConfig: 0/N → All ON → N/N → All OFF → 0/N (N = размер каталога)."""
+    import checks.catalog as catalog
+
+    catalog_size = len(catalog.CHECK_CATALOG)
     project = _copy_project(tmp_path)
     data = _run_gui_script(project, _CATALOG_SCRIPT)
 
     assert data["uses_catalog"] is True
-    assert data["catalog_count"] == 39
+    assert data["catalog_count"] == catalog_size, "GUI и каталог рассинхронизированы"
     assert sorted(data["tree_ids"]) == sorted(data["catalog_ids"])
     assert set(data["badges"]) == set(data["active_ids"]), "бейджи != active каталога"
     assert set(data["checkboxes"]) == set(data["passive_ids"]) | set(data["probe_ids"])
-    assert data["check_vars"] == 39
+    assert data["check_vars"] == catalog_size
 
     # ── default-off ──
-    assert data["summary_initial"].startswith("0 / 39 checks enabled"), data["summary_initial"]
+    off_prefix = f"0 / {catalog_size} checks enabled"
+    assert data["summary_initial"].startswith(off_prefix), data["summary_initial"]
     assert not any(data["check_vars_initial"].values()), "чек-переменные не все выключены"
     assert not any(data["checkbox_vars_initial"].values()), "passive/probe не выключены"
     bad_initial = {cid: t for cid, t in data["badges_initial"].items() if not t.startswith("☐")}
     assert not bad_initial, f"бейджи без ☐ при default-off: {bad_initial}"
 
     # ── All ON ──
-    assert data["summary_all_on"].startswith("39 / 39 checks enabled"), data["summary_all_on"]
-    assert len(data["vars_all_on"]) == 39
+    assert data["summary_all_on"].startswith(f"{catalog_size} / {catalog_size} checks enabled"), (
+        data["summary_all_on"]
+    )
+    assert len(data["vars_all_on"]) == catalog_size
     assert all(data["vars_all_on"].values()), "All ON включил не все чеки"
     bad_on = {cid: t for cid, t in data["badges_all_on"].items() if not t.startswith("☑")}
     assert not bad_on, f"бейджи без ☑ после All ON: {bad_on}"
 
     # ── All OFF ──
-    assert data["summary_all_off"].startswith("0 / 39 checks enabled"), data["summary_all_off"]
+    assert data["summary_all_off"].startswith(off_prefix), data["summary_all_off"]
     assert not any(data["vars_all_off"].values()), "All OFF выключил не все чеки"
     bad_off = {cid: t for cid, t in data["badges_all_off"].items() if not t.startswith("☐")}
     assert not bad_off, f"бейджи без ☐ после All OFF: {bad_off}"
@@ -714,6 +721,10 @@ def _fake_app(tmp_path, settings=None):
     app._roe_stop_on_session_drift = _FakeVar(True)
     app._burp_browser_path = _FakeEntry("")
     app._burp_browser_profile = _FakeEntry("")
+    # Куда инжектить (task-21): поля ScanConfigWindow, персист в settings.json.
+    app._inject_headers_var = _FakeVar(notscan.DEFAULT_INJECT_HEADERS_STR)
+    app._only_params_var = _FakeVar("")
+    app._probe_extra_headers_var = _FakeVar("")
     return app
 
 
@@ -982,3 +993,317 @@ def test_delete_scan_result_cleans_scan_links(tmp_path):
         assert links_left == 0, "после удаления result остались висячие scan_links"
     finally:
         db.set_db_path(tmp_path / "closed.db")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Task-21: выбор, КУДА инжектить — headers / only params
+# ══════════════════════════════════════════════════════════════════
+
+_INJECTION_TARGETS_UI_SCRIPT = r"""
+import json, sys
+sys.path.insert(0, ".")
+import notscan
+
+
+def _entry_values(app):
+    cfg = notscan.ScanConfigWindow(app)
+    app.update()
+    values = {
+        "inject": cfg._inject_headers_entry.get(),
+        "only": cfg._only_params_entry.get(),
+        "extra": cfg._probe_extra_headers_text.get("1.0", "end").strip(),
+    }
+    cfg.destroy()
+    app.update()
+    return values
+
+
+app = notscan.App()
+app.update()
+initial = _entry_values(app)
+initial_vars = {
+    "inject": app._inject_headers_var.get(),
+    "only": app._only_params_var.get(),
+    "extra": app._probe_extra_headers_var.get(),
+}
+# Пользователь меняет значения в окне скана (мусор/дубли — нормализуются).
+cfg = notscan.ScanConfigWindow(app)
+app.update()
+cfg._inject_headers_entry.delete(0, "end")
+cfg._inject_headers_entry.insert(0, " X-Forwarded-Host, X-Host , x-host, ,")
+cfg._only_params_entry.insert(0, "id, q, id")
+cfg._probe_extra_headers_text.insert("1.0", "Cookie: PHPSESSID=abc123\nX-Test-Header: 1")
+# Text→StringVar синхронизация: в реальном UI её делают KeyRelease/FocusOut/Start.
+cfg._sync_probe_extra_headers_field()
+cfg.destroy()
+app.update()
+app._save_proxy_settings()
+project_dir = str(app._project_dir)
+saved = json.loads((app._project_dir / "settings.json").read_text(encoding="utf-8"))
+app._proxy_shutdown_done = True
+app.destroy()
+
+# «Пересоздание App»: новый инстанс, затем возврат в старый проект.
+app2 = notscan.App()
+app2.update()
+new_project_vars = {
+    "inject": app2._inject_headers_var.get(),
+    "only": app2._only_params_var.get(),
+    "extra": app2._probe_extra_headers_var.get(),
+}
+app2._switch_project(project_dir)
+app2.update()
+reloaded_vars = {
+    "inject": app2._inject_headers_var.get(),
+    "only": app2._only_params_var.get(),
+    "extra": app2._probe_extra_headers_var.get(),
+}
+reloaded_entries = _entry_values(app2)
+
+result = {
+    "default_headers": notscan.DEFAULT_INJECT_HEADERS_STR,
+    "initial": initial,
+    "initial_vars": initial_vars,
+    "saved": {
+        "inject": saved.get("inject_headers"),
+        "only": saved.get("only_params"),
+        "extra": saved.get("probe_extra_headers"),
+    },
+    "new_project_vars": new_project_vars,
+    "reloaded_vars": reloaded_vars,
+    "reloaded_entries": reloaded_entries,
+}
+print("RESULT_JSON " + json.dumps(result, ensure_ascii=False))
+app2._proxy_shutdown_done = True
+app2.destroy()
+print("GUI_OK")
+"""
+
+_INJECTION_TARGETS_KWARGS_SCRIPT = r"""
+import json, sys
+sys.path.insert(0, ".")
+import notscan
+import scanner_core
+import path_probe
+import db
+
+captured = {"builds": [], "probes": []}
+
+
+def fake_build(history_ids, enabled_checks, do_query=True, do_body_form=True,
+               do_body_json=True, do_headers=False, safe_mode=True,
+               planner_enabled=True, contracts=None, tamper_modes=None,
+               csrf_token_provider=None, only_params=None):
+    captured["builds"].append({
+        "only_params": only_params,
+        "history_ids": list(history_ids),
+        "enabled_checks": list(enabled_checks),
+    })
+    return []
+
+
+def fake_probe(urls, probe_ids=None, log_cb=None, host_headers=None,
+               extra_headers=None):
+    captured["probes"].append({
+        "urls": list(urls),
+        "probe_ids": list(probe_ids or []),
+        "host_headers": host_headers,
+        "extra_headers": list(extra_headers) if extra_headers else extra_headers,
+    })
+    return 0
+
+
+scanner_core.build_scan_tasks = fake_build
+path_probe.run_probe_scan = fake_probe
+
+app = notscan.App()
+app.update()
+# Только один active и один probe-чек — чтобы пройти "No checks selected" и
+# гарантированно дойти до вызова probe.
+for cid in list(app._check_vars):
+    app._check_vars[cid].set(cid in ("sqli", "info_disclosure_paths"))
+hid = db.insert_history(
+    method="GET", url="http://127.0.0.1:9/never?id=1",
+    req_headers={}, req_body=None, resp_status=200,
+    resp_headers={}, resp_body_preview=None,
+)
+app._scan_list = {hid: db.fetch_history_by_id(hid)}
+app._inject_headers_var.set("X-Forwarded-Host, X-Custom")
+app._only_params_var.set("id, q, ID")
+app._probe_extra_headers_var.set("Cookie: PHPSESSID=abc123\nX-Test-Header: 1")
+
+
+def phase2_prepare():
+    # Пустые поля = дефолт (None → engine/probe сами применяют дефолт).
+    app._inject_headers_var.set("")
+    app._only_params_var.set("")
+    app._probe_extra_headers_var.set("")
+
+
+app.after(0, app._run_scan)
+app.after(1200, phase2_prepare)
+app.after(1400, app._run_scan)
+app.after(3500, app.quit)
+app.mainloop()
+
+print("RESULT_JSON " + json.dumps(captured, ensure_ascii=False))
+app._proxy_shutdown_done = True
+app.destroy()
+print("GUI_OK")
+"""
+
+
+def test_parse_csv_names_tolerates_junk():
+    """parse_csv_names: trim/дедуп/разделители/кавычки/None — без падений."""
+    import notscan
+
+    assert notscan.parse_csv_names(None) == []
+    assert notscan.parse_csv_names("") == []
+    assert notscan.parse_csv_names(" , ; ") == []
+    assert notscan.parse_csv_names(
+        " Host, X-Forwarded-Host, , host ; X-Host "
+    ) == ["Host", "X-Forwarded-Host", "X-Host"]
+    assert notscan.parse_csv_names(["a", " b ", "A"]) == ["a", "b"]
+    assert notscan.parse_csv_names('"X-Test", \'X-Other\'') == ["X-Test", "X-Other"]
+
+
+def test_parse_extra_headers_lines():
+    """parse_extra_headers: "Name: value" построчно, мусор/пустые игнорируются."""
+    import notscan
+
+    parsed = notscan.parse_extra_headers(
+        "Cookie: PHPSESSID=abc; theme=dark\n"
+        "  X-Test-Header:  1  \n"
+        "\n"
+        "no-colon-here\n"
+        ": no-name\n"
+        "X-Empty:\n"
+        "Authorization: Bearer a:b:c"
+    )
+    assert parsed == [
+        ("Cookie", "PHPSESSID=abc; theme=dark"),
+        ("X-Test-Header", "1"),
+        ("Authorization", "Bearer a:b:c"),
+    ]
+    # settings.json может хранить список строк.
+    assert notscan.parse_extra_headers(["Cookie: a=b", "bad", "X: 1"]) == [
+        ("Cookie", "a=b"),
+        ("X", "1"),
+    ]
+    assert notscan.parse_extra_headers(None) == []
+    assert notscan.parse_extra_headers("") == []
+
+
+def test_injection_targets_defaults_and_settings_roundtrip(tmp_path):
+    """Поля injection targets: дефолты, нормализация, persist/read settings."""
+    import notscan
+
+    app = _fake_app(tmp_path)
+    # Дефолты.
+    assert app._scan_host_headers() == list(notscan.DEFAULT_INJECT_HEADERS)
+    assert app._scan_only_params() is None
+    # Мусор/дубли/регистр.
+    app._inject_headers_var.set(" X-Forwarded-Host, X-Custom, x-custom ")
+    app._only_params_var.set(" id, q, ID ")
+    assert app._scan_host_headers() == ["X-Forwarded-Host", "X-Custom"]
+    assert app._scan_only_params() == ["id", "q"]
+    # Сохранение нормализует значения в settings.json.
+    app._save_proxy_settings()
+    saved = json.loads((Path(tmp_path) / "settings.json").read_text(encoding="utf-8"))
+    assert saved["inject_headers"] == "X-Forwarded-Host, X-Custom"
+    assert saved["only_params"] == "id, q"
+    # Пустое поле = дефолт (None для engine/probe).
+    app._inject_headers_var.set("")
+    app._only_params_var.set("")
+    assert app._scan_host_headers() is None
+    assert app._scan_only_params() is None
+    # Extra probe headers: нормализация + persist.
+    app._probe_extra_headers_var.set(
+        "Cookie: PHPSESSID=abc\n\nbad-line\nX-Test-Header: 1"
+    )
+    assert app._scan_probe_extra_headers() == [
+        ("Cookie", "PHPSESSID=abc"),
+        ("X-Test-Header", "1"),
+    ]
+    app._save_proxy_settings()
+    saved = json.loads((Path(tmp_path) / "settings.json").read_text(encoding="utf-8"))
+    assert saved["probe_extra_headers"] == [
+        "Cookie: PHPSESSID=abc",
+        "X-Test-Header: 1",
+    ]
+    # Чтение обратно (в т.ч. если settings хранит списки).
+    app._settings = {
+        "inject_headers": ["X-A", "X-B"],
+        "only_params": "a, b",
+        "probe_extra_headers": ["Cookie: a=b", "X-Test: 1"],
+    }
+    app._apply_settings_to_ui()
+    assert app._inject_headers_var.get() == "X-A, X-B"
+    assert app._only_params_var.get() == "a, b"
+    assert app._probe_extra_headers_var.get() == "Cookie: a=b\nX-Test: 1"
+    # Пустые settings → дефолт для headers, пусто для only_params/extra.
+    app._settings = {}
+    app._apply_settings_to_ui()
+    assert app._inject_headers_var.get() == notscan.DEFAULT_INJECT_HEADERS_STR
+    assert app._only_params_var.get() == ""
+    assert app._probe_extra_headers_var.get() == ""
+
+
+@pytest.mark.integration
+def test_gui_injection_targets_fields_defaults_persist(tmp_path):
+    """GUI: поля существуют, дефолты, persist после пересоздания App/смены проекта."""
+    project = _copy_project(tmp_path)
+    data = _run_gui_script(project, _INJECTION_TARGETS_UI_SCRIPT, timeout=240)
+    default_headers = data["default_headers"]
+
+    # Поля существуют и показывают дефолты.
+    assert data["initial"] == {
+        "inject": default_headers, "only": "", "extra": ""
+    }, data["initial"]
+    assert data["initial_vars"] == {
+        "inject": default_headers, "only": "", "extra": ""
+    }, data["initial_vars"]
+    # Введённые значения сохраняются нормализованными (trim/дедуп).
+    assert data["saved"] == {
+        "inject": "X-Forwarded-Host, X-Host",
+        "only": "id, q",
+        "extra": ["Cookie: PHPSESSID=abc123", "X-Test-Header: 1"],
+    }, data["saved"]
+    # Новый проект стартует с дефолтов.
+    assert data["new_project_vars"] == {
+        "inject": default_headers, "only": "", "extra": ""
+    }
+    # Возврат в проект — значения читаются из settings.json (и в vars, и в полях).
+    assert data["reloaded_vars"] == {
+        "inject": "X-Forwarded-Host, X-Host",
+        "only": "id, q",
+        "extra": "Cookie: PHPSESSID=abc123\nX-Test-Header: 1",
+    }, data["reloaded_vars"]
+    assert data["reloaded_entries"] == data["reloaded_vars"], data["reloaded_entries"]
+
+
+@pytest.mark.integration
+def test_gui_injection_targets_kwargs_passed_to_engine_and_probe(tmp_path):
+    """only_params → build_scan_tasks(), host_headers → run_probe_scan()."""
+    project = _copy_project(tmp_path)
+    data = _run_gui_script(project, _INJECTION_TARGETS_KWARGS_SCRIPT, timeout=240)
+
+    builds = data.get("builds", [])
+    probes = data.get("probes", [])
+    assert len(builds) >= 2, f"build_scan_tasks вызван {len(builds)} раз: {builds}"
+    assert len(probes) >= 2, f"run_probe_scan вызван {len(probes)} раз: {probes}"
+
+    # Фаза 1: кастомные значения доходят до движка/probe в нормализованном виде.
+    assert builds[0]["only_params"] == ["id", "q"], builds[0]
+    assert probes[0]["host_headers"] == ["X-Forwarded-Host", "X-Custom"], probes[0]
+    # RESULT_JSON сериализует tuples как списки.
+    assert [tuple(pair) for pair in probes[0]["extra_headers"]] == [
+        ("Cookie", "PHPSESSID=abc123"),
+        ("X-Test-Header", "1"),
+    ], probes[0]
+    assert probes[0]["probe_ids"]  # probe-чек действительно выбран
+
+    # Фаза 2: пустые поля = дефолт → None (engine/probe применяют свои дефолты).
+    assert builds[1]["only_params"] is None, builds[1]
+    assert probes[1]["host_headers"] is None, probes[1]
+    assert not probes[1]["extra_headers"], probes[1]
