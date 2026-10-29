@@ -1,0 +1,42 @@
+# HTML Injection (marker) payloads
+# WSTG: WSTG-CLNT-03 (HTML Injection)
+# Marker contract: attribute notscan=<n> + text HTMLINJ_MARKER inside a plain tag.
+# Non-executable by design (no <script>, no on* handlers, no javascript: URLs):
+# matcher only checks that the marker tag is reflected unescaped.
+# Format: one payload per line; # comments only in header/sections.
+# Total: 35 payloads
+<h1 notscan=1>HTMLINJ_MARKER</h1>
+<h2 notscan=2>HTMLINJ_MARKER</h2>
+<div notscan=3>HTMLINJ_MARKER</div>
+<span notscan=4>HTMLINJ_MARKER</span>
+<p notscan=5>HTMLINJ_MARKER</p>
+<b notscan=6>HTMLINJ_MARKER</b>
+<i notscan=7>HTMLINJ_MARKER</i>
+<u notscan=8>HTMLINJ_MARKER</u>
+<mark notscan=9>HTMLINJ_MARKER</mark>
+<small notscan=10>HTMLINJ_MARKER</small>
+<strong notscan=11>HTMLINJ_MARKER</strong>
+<em notscan=12>HTMLINJ_MARKER</em>
+<blockquote notscan=13>HTMLINJ_MARKER</blockquote>
+<pre notscan=14>HTMLINJ_MARKER</pre>
+<code notscan=15>HTMLINJ_MARKER</code>
+<article notscan=16>HTMLINJ_MARKER</article>
+<section notscan=17>HTMLINJ_MARKER</section>
+<header notscan=18>HTMLINJ_MARKER</header>
+<footer notscan=19>HTMLINJ_MARKER</footer>
+<nav notscan=20>HTMLINJ_MARKER</nav>
+<table notscan=21><tr><td>HTMLINJ_MARKER</td></tr></table>
+<ul notscan=22><li>HTMLINJ_MARKER</li></ul>
+<ol notscan=23><li>HTMLINJ_MARKER</li></ol>
+<dl notscan=24><dt>HTMLINJ_MARKER</dt></dl>
+<details notscan=25><summary>HTMLINJ_MARKER</summary></details>
+<h1 notscan=26 style="color:red">HTMLINJ_MARKER</h1>
+<h1 notscan="27">HTMLINJ_MARKER</h1>
+<h1 NOTSCAN=28>HTMLINJ_MARKER</h1>
+<H1 notscan=29>HTMLINJ_MARKER</H1>
+"><h1 notscan=30>HTMLINJ_MARKER</h1>
+'><div notscan=31>HTMLINJ_MARKER</div>
+"><h1 notscan=32 class="notscan">HTMLINJ_MARKER</h1>
+<h1 notscan=33>HTMLINJ_MARKER
+<div notscan=34>HTMLINJ_MARKER<!-- notscan --></div>
+<h1 notscan=35 data-notscan="1">HTMLINJ_MARKER</h1>

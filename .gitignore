@@ -1,0 +1,30 @@
+# Generated / local data
+__pycache__/
+*.py[cod]
+.pytest_cache/
+projects/
+*.db
+*.db-wal
+*.db-shm
+reports/
+payloads/custom/*.txt
+!payloads/custom/README.txt
+*.log
+
+# Virtualenv / tooling caches
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

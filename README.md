@@ -1,0 +1,161 @@
+# notscan
+
+**notscan** is a desktop web-vulnerability scanner with a Tkinter GUI: it intercepts
+HTTP(S) traffic through a built-in proxy, turns captured requests into mutation-based
+security tests, runs them with an async scan engine and stores findings with evidence
+and reports.
+
+> ⚠️ **Authorization required.** Use notscan only against applications you own or have
+> explicit written permission to test. The authors are not responsible for misuse.
+
+🇷🇺 [Русская версия README](README.ru.md)
+
+![python](https://img.shields.io/badge/python-3.10%2B-blue)
+![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey)
+![WSTG](https://img.shields.io/badge/OWASP-WSTG%20v4.2%2Fv5-orange)
+![checks](https://img.shields.io/badge/checks-38%20(16%20active%20%2F%2016%20passive%20%2F%206%20probe)-informational)
+![license](https://img.shields.io/badge/license-MIT-green)
+
+---
+
+## Features
+
+- **Intercepting proxy** — mitmproxy-based local proxy writes method, URL, headers, body
+  and response preview into a per-project SQLite database. One click starts the proxy and
+  a preconfigured Chromium/Burp Browser (PAC + certificate bypass for the isolated profile).
+- **Mutation scan engine** — builds tasks from captured requests over query parameters,
+  `application/x-www-form-urlencoded` bodies, JSON bodies and (optionally) headers.
+  Async engine (`asyncio` + `httpx.AsyncClient`) with configurable concurrency, RPS limit
+  and scope guard; redirects are **never followed** (a payload-controlled redirect must not
+  turn a scan into an outbound request).
+- **WSTG check catalog (38 checks)** — a single catalog (`checks/catalog.py`) drives the GUI
+  Checks/WSTG tab, the scan-config badges, the WSTG map of findings and payload files:
+  **16 active + 16 passive + 6 probe**. WSTG IDs are aligned with OWASP WSTG v4.2 and the
+  v5 checklist (tests missing from v4.2 are marked `(v5)`). Full table:
+  [`docs/CHECKS.md`](docs/CHECKS.md).
+  - Active: SQLi (error-based + time-based blind), CMDi, SSTI, LDAP/XPath/NoSQL injection,
+    XXE, insecure deserialization, CRLF/header injection, SSRF, SSI injection,
+    path traversal, reflected XSS, HTML injection, open redirect.
+  - Passive: sensitive info disclosure, outdated JS libs, missing SRI, security headers,
+    HSTS, CSP, cookie attributes, cacheable sensitive responses, cleartext credentials,
+    browser storage of secrets, CSRF token presence, JWT signature, clickjacking,
+    file upload heuristics, DOM-XSS heuristic, IDOR.
+  - Probe: sensitive files/backups, webserver metafiles, RIA cross-domain policy,
+    HTTP methods/TRACE, admin/debug interface exposure, CORS misconfiguration.
+- **False-positive controls** — bare-tag/XSS content-type/baseline-aware rules,
+  reflection-aware path-traversal and open-redirect matchers, soft-404 and WAF-page
+  filters for probes, host-timing calibration for time-based SQLi
+  (relative threshold `max(payload_delay, 3×baseline_p50 + 1s)`).
+- **Tamper / WAF-bypass encoders** — `url`, `unicode`, `hex`, `double-url`
+  (optional, applied only to server-side injection checks).
+- **Stateful scanning (optional)** — reuse captured login requests, retry on 401/403 with
+  refresh/relogin, and inject a fresh CSRF token into every mutation
+  (`templating.patch_csrf_token` + `SessionManager.csrf_token_provider`).
+- **Triage & evidence** — severity/confidence/exploitability, dedup by stable fingerprint,
+  raw HTTP request/response, unified diff snippets, manual confirm flow
+  (baseline / benign / suspicious replay), paginated results.
+- **Reports** — Markdown, JSON, HTML, SARIF, DOCX; the full result set is exported by
+  default (no silent truncation).
+- **Payload sets** — ~3.2k payloads across 18 sets (SQLi, XSS, SSTI, SSRF, XXE, NoSQLi,
+  LDAP, XPath, CRLF, CMDi, path traversal, open redirect, file upload, IDOR,
+  deserialization, SSI, HTML injection, time-based SQLi). Safe Mode filters destructive
+  payloads. See [`payloads/README.md`](payloads/README.md).
+- **Projects** — every launch works in its own project directory with its own DB, settings
+  and reports; switch between projects via **Project → Sessions / Projects…**. Project
+  switching is blocked while a scan is running.
+- **Extra tools** — reverse-shell command generator (generates commands only, never
+  executes them), endpoint contract inference, auth-boundary (anonymous vs authenticated)
+  comparison, collection import/export (raw HTTP, HAR, Postman).
+
+## Install
+
+```bash
+git clone https://github.com/<owner>/notscan.git
+cd notscan
+python -m pip install -r requirements.txt
+```
+
+Requirements: Python 3.10+ (tested on 3.13), Tkinter (`python3-tk` on Debian/Ubuntu),
+mitmproxy, httpx, ttkbootstrap, python-docx. Details and troubleshooting:
+[`docs/INSTALL.md`](docs/INSTALL.md).
+
+## Quick start
+
+```bash
+python notscan.py
+```
+
+1. The proxy starts automatically on `127.0.0.1:8080` (if the port is busy, the next free
+   port is chosen automatically — check the status label).
+2. Click **▶ Start Proxy + Browser** to launch an isolated Chromium with the proxy already
+   configured, then browse the target application and exercise its features.
+3. In the **History** tab select the requests of interest (double-click also adds them),
+   press **＋ Add to Scan list**, then **▶ Run Scan**.
+4. In the scan-config window pick checks (active / passive / probe), mutation points and
+   ROE options (concurrency, RPS, scope allowlist, Safe Mode, tamper), then **Start Scan**.
+5. Review findings in **Scan Results** (severity, evidence, raw HTTP, diff, confirm flow)
+   and export a report (MD / JSON / HTML / SARIF / DOCX).
+
+The proxy stops automatically when the browser it launched is closed, after an idle timeout
+(`proxy_idle_stop_min`, default 15 min) and on application exit — the port is always
+released. Lifecycle settings are persisted per project:
+`proxy_autostart`, `proxy_stop_on_browser_exit`, `proxy_idle_stop_min`.
+
+## Testing
+
+```bash
+make test     # full pytest suite
+make lab      # integration tests against the local HTTP lab (needs xvfb for GUI parts)
+make smoke    # headless GUI smoke test in xvfb on a temp copy of the project
+```
+
+The repository ships a self-contained HTTP lab (`tests/lab/`) with intentionally vulnerable
+endpoints (reflected XSS, escaped reflection, SQL errors, redirects, delayed responses,
+CSRF-protected form, JSON API, cookie/CORS/SSRF/SSI cases, sensitive files/metafiles) used
+by 339 unit and integration tests. Proxy-lifecycle integration tests are skipped
+automatically when mitmproxy or a display is unavailable.
+
+## Project structure
+
+```
+notscan.py            Tkinter GUI (proxy, scan, results, auth, revshell, checks/WSTG tabs)
+scanner_core.py       async scan engine, task builder, matchers, scope guard, ROE
+checks/               check catalog, active/passive checks, WSTG map, FP rules, runner
+templating.py         raw-HTTP parsing/mutation, JSON payload escaping, tamper, CSRF patch
+session_manager.py    login/refresh/relogin sessions, CSRF token provider
+db.py                 per-project SQLite storage (WAL, per-thread connections)
+report_export.py      MD / JSON / HTML / SARIF / DOCX reports
+mitm_proxy.py         mitmproxy-based intercepting proxy + PAC server
+path_probe.py         probe checks (sensitive files, metafiles, CORS, HTTP methods, …)
+payloads/             payload sets (one payload per line) + payload docs
+tests/                unit + integration tests and the local HTTP lab
+docs/                 install, functional overview, WSTG check table
+```
+
+## Documentation
+
+- [`docs/INSTALL.md`](docs/INSTALL.md) — requirements, installation, troubleshooting
+- [`docs/FUNCTIONAL_OVERVIEW.md`](docs/FUNCTIONAL_OVERVIEW.md) — architecture and features
+- [`docs/CHECKS.md`](docs/CHECKS.md) — full WSTG check catalog
+- [`payloads/README.md`](payloads/README.md) — payload sets and how to extend them
+- [`README.ru.md`](README.ru.md) — Russian README
+
+## Known limitations
+
+- No crawler/endpoint discovery: scan targets are the requests you captured through the
+  proxy (or imported from a collection). Adding a lightweight crawler is on the roadmap.
+- Some passive checks need the captured proxy response to be meaningful; HSTS is meaningful
+  for HTTPS targets only (unit-tested, not exercised by the HTTP lab).
+- Probe checks issue real `OPTIONS`/`TRACE`/`PUT`/`DELETE` requests — enable them only on
+  targets you are allowed to test.
+- This is a learning/practical tool, not a replacement for Burp Suite/ZAP/Nuclei.
+  No CI is configured yet; run `make test` locally.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
+
+Credits: [OWASP WSTG](https://owasp.org/www-project-web-security-testing-guide/),
+[PayloadsAllTheThings](https://github.com/swisskyrepo/PayloadsAllTheThings),
+[mitmproxy](https://mitmproxy.org/), [httpx](https://www.python-httpx.org/),
+[ttkbootstrap](https://github.com/israel-dryer/ttkbootstrap).

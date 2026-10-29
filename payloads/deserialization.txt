@@ -1,0 +1,21 @@
+# Insecure Deserialization payloads
+# Source: https://github.com/swisskyrepo/PayloadsAllTheThings
+# Total: 16 payloads
+rO0ABXNyABdqYXZhLnV0aWwuUHJpb3JpdHlRdWV1ZQ==
+rO0ABXNyABNqYXZhLnV0aWwuQXJyYXlMaXN0AAAAAAAAAAA=
+O:4:"User":1:{s:4:"name";s:5:"admin";}
+O:8:"stdClass":1:{s:4:"exec";s:2:"id";}
+a:2:{s:8:"username";s:5:"admin";s:8:"password";s:5:"wrong";}
+Y2dlZXRlbXBmaWxlCm1rZHRlbXAKKVIu
+AAEAAAD/////AQAAAAAAAAAEAQAAAB==
+BAhJIgppZAY6BkVU
+
+# ── Round-2 additions (2026-10-29): modern/unique payloads, deduped vs existing ──
+O:7:"Notscan":1:{s:4:"test";s:2:"ok";}
+O:8:"stdClass":2:{s:4:"test";s:2:"ok";s:7:"notscan";s:2:"ok";}
+O:22:"__PHP_Incomplete_Class":1:{s:7:"notscan";s:2:"ok";}
+a:1:{i:0;s:7:"notscan";}
+gAJ9cQBYBwAAAG5vdHNjYW5xAVgGAAAAbWFya2VycQJzLg==
+BAhJIhVub3RzY2FuX21hcmtlcgY6BkVU
+{"__proto__":{"notscan":"polluted"}}
+!!python/object:notscan.Marker {notscan: ok}

