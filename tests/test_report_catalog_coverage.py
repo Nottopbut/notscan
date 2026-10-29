@@ -66,3 +66,36 @@ def test_report_export_new_checks_end_to_end():
     finally:
         if os.path.exists(dbfile):
             os.remove(dbfile)
+
+def test_recommendations_exist_in_both_languages():
+    import i18n
+
+    saved = i18n.get_language()
+    try:
+        for lang, generic in (
+            ("ru", report_export.GENERIC_RECOMMENDATION),
+            ("en", report_export.GENERIC_RECOMMENDATION_EN),
+        ):
+            i18n.set_language(lang)
+            missing = [
+                d.check_id for d in CHECK_CATALOG
+                if report_export._recommendation_for(d.check_id) == generic
+            ]
+            assert not missing, f"нет {lang}-рекомендации для чеков: {missing}"
+    finally:
+        i18n.set_language(saved)
+
+
+def test_all_ru_recommendations_have_en_translation():
+    import i18n
+
+    saved = i18n.get_language()
+    try:
+        i18n.set_language("en")
+        missing = [
+            ct for ct in report_export.RECOMMENDATIONS
+            if report_export._recommendation_for(ct) == report_export.GENERIC_RECOMMENDATION_EN
+        ]
+        assert not missing, f"нет EN-рекомендации: {missing}"
+    finally:
+        i18n.set_language(saved)

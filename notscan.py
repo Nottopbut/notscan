@@ -67,6 +67,7 @@ from tkinter import filedialog
 import httpx
 from templating import parse_raw_http, build_raw_http
 import ui_theme
+import i18n
 
 
 # ──────────────────────────── Helpers ────────────────────────────
@@ -190,6 +191,7 @@ class DetailWindow(tk.Toplevel):
         self.geometry("900x700")
         self.configure(bg=self._tokens.app_bg)
         self._build(result_id)
+        i18n.translate_widget_tree(self)
 
     def _build(self, result_id: int) -> None:
         result = db.fetch_scan_result_by_id(result_id)
@@ -545,6 +547,7 @@ class ContractWindow(tk.Toplevel):
         self.configure(bg=self._tokens.app_bg)
         self._build()
         self.refresh()
+        i18n.translate_widget_tree(self)
 
     def _build(self) -> None:
         top = ttk.Frame(self)
@@ -647,6 +650,7 @@ class AuthBoundaryResultsWindow(tk.Toplevel):
         self.configure(bg=self._tokens.app_bg)
         self._build()
         self.refresh()
+        i18n.translate_widget_tree(self)
 
     def _build(self) -> None:
         top = ttk.Frame(self)
@@ -779,6 +783,7 @@ class RawViewWindow(tk.Toplevel):
         self.geometry("1000x720")
         self.configure(bg=self._tokens.app_bg)
         self._build(record)
+        i18n.translate_widget_tree(self)
 
     def _build(self, record: dict) -> None:
         nb = ttk.Notebook(self)
@@ -893,6 +898,7 @@ class ScanRawViewWindow(tk.Toplevel):
         self.geometry("1000x720")
         self.configure(bg=self._tokens.app_bg)
         self._build(result, scan_req)
+        i18n.translate_widget_tree(self)
 
     def _build(self, result: dict, scan_req: Optional[dict]) -> None:
         nb = ttk.Notebook(self)
@@ -1116,6 +1122,28 @@ except Exception:  # ImportError или временно битый паралл
 BADGE_LABELS: dict[str, str] = {
     cid: lbl for cid, lbl, _on in SERVER_BADGES + CLIENT_BADGES + OTHER_BADGES
 }
+# Короткие подписи для чеков из каталога, которых нет в legacy-бейджах.
+BADGE_LABELS_NEW: dict[str, str] = {
+    "metafiles": "Metafiles",
+    "server_fingerprint": "Fingerprint",
+    "errh": "Verbose Errors",
+    "hsts": "HSTS",
+    "csp": "CSP",
+    "ria_policy": "RIA Policy",
+    "http_methods": "HTTP Methods",
+    "sensitive_files": "Sensitive Files",
+    "info_disclosure_paths": "Admin Debug",
+    "host_header_injection": "Host Header",
+    "sqli_blind": "SQLi Blind",
+    "ssi_injection": "SSI",
+    "html_injection": "HTML Injection",
+    "browser_storage": "Browser Storage",
+    "cookies": "Cookie Attrs",
+    "session_in_url": "Token in URL",
+    "cache_control": "Response Cache",
+    "insecure_login": "Cleartext Login",
+    "cors": "CORS",
+}
 
 # Старые наборы — fallback, пока каталог не готов (сохраняем 163 старых теста).
 _LEGACY_PASSIVE_CHECK_IDS = {
@@ -1177,11 +1205,13 @@ def catalog_categories() -> list[str]:
 
 
 def _badge_label_for(defn) -> str:
-    """Короткая подпись бейджа: существующие короткие — как были, новые — из name."""
+    """Короткая подпись бейджа (RU/EN по текущему языку); новые — из name."""
     cid = str(_def_attr(defn, "check_id", ""))
     if cid in BADGE_LABELS:
-        return BADGE_LABELS[cid]
-    name = str(_def_attr(defn, "name", "") or cid)
+        return i18n.tr(BADGE_LABELS[cid])
+    if cid in BADGE_LABELS_NEW:
+        return i18n.tr(BADGE_LABELS_NEW[cid])
+    name = i18n.tr(str(_def_attr(defn, "name", "") or cid))
     return name if len(name) <= 22 else name[:21] + "…"
 
 
@@ -1274,7 +1304,19 @@ def registry_check_ids() -> list[str]:
 
 
 class ScanConfigWindow(tk.Toplevel):
-    """Всплывающее окно настройки параметров скана."""
+    """Всплывающее окно настройки параметров скана.
+
+    UX: сначала простой выбор профиля (Quick/Standard/Full/Custom), остальное
+    спрятано под «Customize checks» (секции чеков) и «Advanced options»
+    (workers/safe/tamper/mutations/injection targets). Окно компактное,
+    контент скроллится при раскрытии секций.
+    """
+
+    STANDARD_ACTIVE_CHECKS = (
+        "sqli", "xss_reflected", "cmdi", "ssrf",
+        "path_traversal", "open_redirect", "crlf_injection",
+    )
+    PROFILE_KEYS = ("quick", "standard", "full", "custom")
 
     def __init__(self, parent: "App", on_start=None):
         super().__init__(parent)
@@ -1283,17 +1325,26 @@ class ScanConfigWindow(tk.Toplevel):
         self._badges: dict[str, tk.Label] = {}
         self._badge_labels: dict[str, str] = {}
         self._check_widgets: dict[str, ttk.Checkbutton] = {}
+        self._customize_checks_var = tk.BooleanVar(value=False)
+        self._advanced_var = tk.BooleanVar(value=False)
         tokens = getattr(parent, "_tokens", None) or ui_theme.get_tokens("dark")
+        self._win_tokens = tokens
         self.configure(bg=tokens.app_bg)
         self.title("Scan configuration")
-        self.geometry("900x840")
+        self.geometry("760x560")
+        self.minsize(680, 420)
         self.transient(parent)
         self._build()
         try:
             self.grab_set()
         except Exception:
             pass
+        try:
+            i18n.translate_widget_tree(self)
+        except Exception:
+            pass
 
+    # ── badges helpers (сохраняют прежнее поведение для тестов) ──
     def _badge_text(self, cid: str, enabled: bool) -> str:
         """Текст бейджа: текстовый индикатор ON/OFF + короткая подпись."""
         return f"{'☑' if enabled else '☐'} {self._badge_labels.get(cid, cid)}"
@@ -1328,10 +1379,13 @@ class ScanConfigWindow(tk.Toplevel):
             bg=on_bg if var.get() else off_bg,
             fg=on_fg if var.get() else off_fg,
         )
+
         def _toggle(_e=None):
             val = not var.get()
             var.set(val)
             self._refresh_badge(cid, val)
+            self._sync_profile_with_selection()
+
         badge.bind("<Button-1>", _toggle)
         badge.grid(row=row, column=col, padx=3, pady=3, sticky="ew")
         self._badges[cid] = badge
@@ -1349,101 +1403,295 @@ class ScanConfigWindow(tk.Toplevel):
                 var.set(True)
             self._refresh_badge(cid, True)
 
-    def _badge_section(self, title: str, items, cols: int = 5) -> None:
+    def _set_selection(self, enabled_ids) -> None:
+        """Включить только перечисленные чеки (для профилей Quick/Standard)."""
+        enabled = set(enabled_ids)
+        for cid, var in self._parent._check_vars.items():
+            value = cid in enabled
+            try:
+                var.set(value)
+            except Exception:
+                pass
+            self._refresh_badge(cid, value)
+
+    # ── секции ──
+    def _badge_section(self, parent_frame, title: str, items, cols: int = 5) -> None:
         """Секция кликабельных бейджей (active-чеки из каталога)."""
-        lf = ttk.LabelFrame(self, text=title)
-        lf.pack(fill=tk.X, padx=8, pady=2)
+        lf = ttk.LabelFrame(parent_frame, text=title)
+        lf.pack(fill=tk.X, padx=4, pady=2)
         for i, (cid, lbl) in enumerate(items):
             self._badge(lf, cid, lbl, i // cols, i % cols)
         for c in range(max(1, cols)):
             lf.columnconfigure(c, weight=1)
 
-    def _check_section(self, title: str, items, cols: int = 4) -> None:
+    def _check_section(self, parent_frame, title: str, items, cols: int = 4) -> None:
         """Секция чекбоксов (passive/probe-чеки из каталога)."""
-        lf = ttk.LabelFrame(self, text=title)
-        lf.pack(fill=tk.X, padx=8, pady=2)
+        lf = ttk.LabelFrame(parent_frame, text=title)
+        lf.pack(fill=tk.X, padx=4, pady=2)
         for i, (cid, lbl) in enumerate(items):
             var = self._parent._check_vars.get(cid)
             if var is None:
                 var = tk.BooleanVar(value=False)
                 self._parent._check_vars[cid] = var
-            cb = ttk.Checkbutton(lf, text=lbl, variable=var)
+            cb = ttk.Checkbutton(lf, text=lbl, variable=var, command=self._sync_profile_with_selection)
             cb.grid(row=i // cols, column=i % cols, sticky="w", padx=4, pady=2)
             self._check_widgets[cid] = cb
         for c in range(max(1, cols)):
             lf.columnconfigure(c, weight=1)
 
+    # ── profiles ──
+    def _profile(self) -> str:
+        try:
+            name = str(self._parent._scan_profile_var.get() or "custom").lower()
+        except Exception:
+            name = "custom"
+        return name if name in self.PROFILE_KEYS else "custom"
+
+    def _profile_description_key(self, name: str) -> str:
+        return {
+            "quick": (
+                "Quick: safe reconnaissance — all passive + probe checks, "
+                "no active payload checks."
+            ),
+            "standard": (
+                "Standard: recommended active checks (SQLi, XSS, CMDi, SSRF, path "
+                "traversal, open redirect, CRLF) + all passive/probe checks."
+            ),
+            "full": (
+                "Full: all checks enabled — noisy and slow; use only on authorized "
+                "targets."
+            ),
+            "custom": "Custom: keep the current check selection (nothing is changed).",
+        }.get(name, "")
+
+    def _update_profile_description(self) -> None:
+        try:
+            name = self._profile()
+            self._profile_desc_lbl.configure(
+                text=i18n.tr(self._profile_description_key(name))
+            )
+        except Exception:
+            pass
+
+    def _apply_profile(self, name: str, persist: bool = True) -> None:
+        """Применить профиль к parent._check_vars (Custom — не менять выбор)."""
+        p = self._parent
+        name = (name or "custom").lower()
+        if name not in self.PROFILE_KEYS:
+            name = "custom"
+        try:
+            if name == "full":
+                self._set_all(True)
+            elif name == "quick":
+                self._set_selection(set(passive_check_ids()) | set(probe_check_ids()))
+                p._safe_mode_var.set(True)
+            elif name == "standard":
+                catalog_ids = set(p._check_vars.keys())
+                recommended = {
+                    cid for cid in self.STANDARD_ACTIVE_CHECKS if cid in catalog_ids
+                }
+                self._set_selection(
+                    set(passive_check_ids()) | set(probe_check_ids()) | recommended
+                )
+                p._safe_mode_var.set(True)
+            # custom: ничего не меняем — сохраняем текущий выбор
+        except Exception:
+            pass
+        try:
+            p._update_scan_summary()
+        except Exception:
+            pass
+        try:
+            load_tree = getattr(p, "_load_checks_tree", None)
+            if callable(load_tree):
+                load_tree()
+        except Exception:
+            pass
+        if persist:
+            try:
+                p._settings["scan_profile"] = name
+                p._save_proxy_settings()
+            except Exception:
+                pass
+        self._update_profile_description()
+
+    def _sync_profile_with_selection(self) -> None:
+        """Ручное изменение чеков переводит профиль в Custom (без перезаписи)."""
+        try:
+            if self._profile() != "custom":
+                self._parent._scan_profile_var.set("custom")
+                self._update_profile_description()
+                try:
+                    self._parent._settings["scan_profile"] = "custom"
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _on_profile_change(self) -> None:
+        self._apply_profile(self._profile())
+
+    def _toggle_checks_section(self) -> None:
+        self._refresh_content_visibility()
+
+    def _toggle_advanced_section(self) -> None:
+        self._refresh_content_visibility()
+
+    def _refresh_content_visibility(self) -> None:
+        for frame in (self._checks_frame, self._advanced_frame):
+            try:
+                frame.pack_forget()
+            except Exception:
+                pass
+        if self._customize_checks_var.get():
+            self._checks_frame.pack(fill=tk.X, pady=2)
+        if self._advanced_var.get():
+            self._advanced_frame.pack(fill=tk.X, pady=2)
+        try:
+            self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+        except Exception:
+            pass
+
+    # ── build ──
     def _build(self):
         p = self._parent
+        tokens = self._win_tokens
 
+        # 1) Профиль скана (главное, всегда видно)
+        prof = ttk.LabelFrame(self, text="Scan profile")
+        prof.pack(fill=tk.X, padx=8, pady=(8, 2))
+        prof_row = ttk.Frame(prof)
+        prof_row.pack(fill=tk.X, padx=6, pady=(2, 0))
+        for key, label in (
+            ("quick", "Quick"),
+            ("standard", "Standard"),
+            ("full", "Full"),
+            ("custom", "Custom"),
+        ):
+            ttk.Radiobutton(
+                prof_row, text=label, value=key,
+                variable=p._scan_profile_var, command=self._on_profile_change,
+            ).pack(side=tk.LEFT, padx=4)
+        self._profile_desc_lbl = ttk.Label(
+            prof, text="", foreground="#a6adc8", wraplength=700, justify="left",
+        )
+        self._profile_desc_lbl.pack(anchor="w", padx=6, pady=(2, 4))
+
+        # 2) Тумблеры раскрытия секций
+        toggles = ttk.Frame(self)
+        toggles.pack(fill=tk.X, padx=10, pady=(2, 2))
+        ttk.Checkbutton(
+            toggles, text="Customize checks", variable=self._customize_checks_var,
+            command=self._toggle_checks_section,
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(
+            toggles, text="Advanced options", variable=self._advanced_var,
+            command=self._toggle_advanced_section,
+        ).pack(side=tk.LEFT, padx=16)
+
+        # 3) Скроллируемая область контента
+        body = ttk.Frame(self)
+        body.pack(fill=tk.BOTH, expand=True, padx=4, pady=(2, 2))
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1)
+        self._canvas = tk.Canvas(body, highlightthickness=0, bg=tokens.app_bg)
+        vsb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=vsb.set)
+        self._canvas.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        content = ttk.Frame(self._canvas)
+        self._content = content
+        self._content_window = self._canvas.create_window((0, 0), window=content, anchor="nw")
+        content.bind(
+            "<Configure>",
+            lambda _e: self._canvas.configure(scrollregion=self._canvas.bbox("all")),
+        )
+        self._canvas.bind(
+            "<Configure>",
+            lambda e: self._canvas.itemconfigure(self._content_window, width=e.width),
+        )
+
+        # 3a) Скрытая секция выбора чеков
+        self._checks_frame = ttk.Frame(content)
         groups = catalog_badge_lists()
         if groups:
-            # Данные из checks/catalog.py: active/passive/probe.
-            self._badge_section("Server-side active checks", groups.get("server", []), cols=5)
-            self._badge_section("Client-side active checks", groups.get("client", []), cols=5)
-            self._check_section("Passive checks (analyze captured responses)",
-                                groups.get("passive", []), cols=4)
-            self._check_section("Probe checks (extra paths/requests)",
-                                groups.get("probe", []), cols=4)
+            self._badge_section(
+                self._checks_frame, "Server-side active checks",
+                groups.get("server", []), cols=5)
+            self._badge_section(
+                self._checks_frame, "Client-side active checks",
+                groups.get("client", []), cols=5)
+            self._check_section(
+                self._checks_frame, "Passive checks (analyze captured responses)",
+                groups.get("passive", []), cols=4)
+            self._check_section(
+                self._checks_frame, "Probe checks (extra paths/requests)",
+                groups.get("probe", []), cols=4)
             server_ids = [cid for cid, _ in groups.get("server", [])]
             client_ids = [cid for cid, _ in groups.get("client", [])]
         else:
-            # Fallback: прежние hardcoded-списки (пока каталога нет).
-            server_lf = ttk.LabelFrame(self, text="Server-side checks")
-            server_lf.pack(fill=tk.X, padx=8, pady=(8, 2))
-            for i, (cid, lbl, _on) in enumerate(SERVER_BADGES):
-                self._badge(server_lf, cid, lbl, i // 5, i % 5)
-            for c in range(5):
-                server_lf.columnconfigure(c, weight=1)
-
-            client_lf = ttk.LabelFrame(self, text="Client-side checks")
-            client_lf.pack(fill=tk.X, padx=8, pady=2)
-            for i, (cid, lbl, _on) in enumerate(CLIENT_BADGES):
-                self._badge(client_lf, cid, lbl, 0, i)
-            for c in range(len(CLIENT_BADGES)):
-                client_lf.columnconfigure(c, weight=1)
-
-            other_lf = ttk.LabelFrame(self, text="Other")
-            other_lf.pack(fill=tk.X, padx=8, pady=2)
-            for i, (cid, lbl, _on) in enumerate(OTHER_BADGES):
-                self._badge(other_lf, cid, lbl, 0, i)
-            for c in range(len(OTHER_BADGES)):
-                other_lf.columnconfigure(c, weight=1)
+            self._badge_section(
+                self._checks_frame, "Server-side checks",
+                [(cid, lbl) for cid, lbl, _on in SERVER_BADGES], cols=5)
+            self._badge_section(
+                self._checks_frame, "Client-side checks",
+                [(cid, lbl) for cid, lbl, _on in CLIENT_BADGES], cols=5)
+            self._badge_section(
+                self._checks_frame, "Other",
+                [(cid, lbl) for cid, lbl, _on in OTHER_BADGES], cols=5)
             server_ids = [c[0] for c in SERVER_BADGES]
             client_ids = [c[0] for c in CLIENT_BADGES]
 
-        qsel = ttk.Frame(self)
+        qsel = ttk.Frame(self._checks_frame)
         qsel.pack(fill=tk.X, padx=8, pady=4)
-        ttk.Label(qsel, text="Quick select:").pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(qsel, text="All ON", command=lambda: self._set_all(True), width=8).pack(side=tk.LEFT, padx=2)
-        ttk.Button(qsel, text="All OFF", command=lambda: self._set_all(False), width=8).pack(side=tk.LEFT, padx=2)
-        ttk.Button(qsel, text="Server only", command=lambda: self._only(server_ids), width=11).pack(side=tk.LEFT, padx=2)
-        ttk.Button(qsel, text="Client only", command=lambda: self._only(client_ids), width=11).pack(side=tk.LEFT, padx=2)
+        def _quick_select(value):
+            self._set_all(value)
+            self._sync_profile_with_selection()
 
-        mut_lf = ttk.LabelFrame(self, text="Mutation points")
-        mut_lf.pack(fill=tk.X, padx=8, pady=2)
+        def _quick_only(ids):
+            self._only(ids)
+            self._sync_profile_with_selection()
+
+        ttk.Label(qsel, text="Quick select:").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(qsel, text="All ON", command=lambda: _quick_select(True),
+                   width=8).pack(side=tk.LEFT, padx=2)
+        ttk.Button(qsel, text="All OFF", command=lambda: _quick_select(False),
+                   width=8).pack(side=tk.LEFT, padx=2)
+        ttk.Button(qsel, text="Server only", command=lambda: _quick_only(server_ids),
+                   width=11).pack(side=tk.LEFT, padx=2)
+        ttk.Button(qsel, text="Client only", command=lambda: _quick_only(client_ids),
+                   width=11).pack(side=tk.LEFT, padx=2)
+
+        # 3b) Скрытая секция advanced-настроек
+        self._advanced_frame = ttk.Frame(content)
+        adv = self._advanced_frame
+
+        mut_lf = ttk.LabelFrame(adv, text="Mutation points")
+        mut_lf.pack(fill=tk.X, padx=4, pady=2)
         for text, var in [
             ("Query params", p._mut_query),
             ("Body form", p._mut_form),
             ("Body JSON", p._mut_json),
             ("Headers", p._mut_headers),
         ]:
-            ttk.Checkbutton(mut_lf, text=text, variable=var).pack(side=tk.LEFT, padx=6, pady=4)
+            ttk.Checkbutton(mut_lf, text=text, variable=var).pack(
+                side=tk.LEFT, padx=6, pady=4)
 
-        # ── Куда именно инжектить (headers для probe, ограничение параметров) ──
-        targets_lf = ttk.LabelFrame(self, text="Injection targets (advanced)")
-        targets_lf.pack(fill=tk.X, padx=8, pady=2)
+        targets_lf = ttk.LabelFrame(adv, text="Injection targets (advanced)")
+        targets_lf.pack(fill=tk.X, padx=4, pady=2)
 
         hdr_row = ttk.Frame(targets_lf)
         hdr_row.pack(fill=tk.X, padx=6, pady=(4, 0))
-        ttk.Label(hdr_row, text="Injection headers (comma-separated; empty = default):").pack(
-            side=tk.LEFT)
+        ttk.Label(
+            hdr_row, text="Injection headers (comma-separated; empty = default):",
+        ).pack(side=tk.LEFT)
         self._inject_headers_entry = ttk.Entry(
             hdr_row, textvariable=p._inject_headers_var, width=38)
         self._inject_headers_entry.pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Label(
             targets_lf,
-            text=f"  default: {DEFAULT_INJECT_HEADERS_STR}  ·  используется host-header-injection probe",
+            text=f"  default: {DEFAULT_INJECT_HEADERS_STR}  ·  используется "
+                 "host-header-injection probe",
             foreground="#a6adc8",
         ).pack(anchor="w", padx=6)
 
@@ -1456,7 +1704,8 @@ class ScanConfigWindow(tk.Toplevel):
         self._only_params_entry.pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Label(
             targets_lf,
-            text="  e.g. id, q, username — остальные параметры не мутируются (пусто = все)",
+            text="  e.g. id, q, username — остальные параметры не мутируются "
+                 "(пусто = все)",
             foreground="#a6adc8",
         ).pack(anchor="w", padx=6, pady=(0, 4))
 
@@ -1464,15 +1713,15 @@ class ScanConfigWindow(tk.Toplevel):
         extra_lbl_row.pack(fill=tk.X, padx=6, pady=(2, 0))
         ttk.Label(
             extra_lbl_row,
-            text="Extra probe headers (for probes; e.g. Cookie: PHPSESSID=...; one per line):",
+            text="Extra probe headers (for probes; e.g. Cookie: PHPSESSID=...; "
+                 "one per line):",
         ).pack(side=tk.LEFT)
         extra_row = ttk.Frame(targets_lf)
         extra_row.pack(fill=tk.X, padx=6, pady=(0, 4))
         self._probe_extra_headers_text = tk.Text(
             extra_row, height=3, font=("Consolas", 9), wrap=tk.NONE,
         )
-        _tokens = getattr(p, "_tokens", None) or ui_theme.get_tokens("dark")
-        ui_theme.apply_text_theme(self._probe_extra_headers_text, _tokens)
+        ui_theme.apply_text_theme(self._probe_extra_headers_text, tokens)
         self._probe_extra_headers_text.insert("1.0", p._probe_extra_headers_var.get())
         self._probe_extra_headers_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
@@ -1488,28 +1737,62 @@ class ScanConfigWindow(tk.Toplevel):
         self._probe_extra_headers_text.bind("<FocusOut>", _sync_probe_extra_headers)
         ttk.Label(
             targets_lf,
-            text="  отправляется только probe-чекам (sensitive files/metafiles/host-header/CORS/…), не в мутации",
+            text="  отправляется только probe-чекам (sensitive files/metafiles/"
+                 "host-header/CORS/…), не в мутации",
             foreground="#a6adc8",
         ).pack(anchor="w", padx=6, pady=(0, 4))
         for _entry in (self._inject_headers_entry, self._only_params_entry):
             _entry.bind("<FocusOut>", lambda _e: p._save_proxy_settings())
 
-        opt = ttk.Frame(self)
+        opt = ttk.Frame(adv)
         opt.pack(fill=tk.X, padx=8, pady=2)
         ttk.Label(opt, text="Workers:").pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Spinbox(opt, from_=1, to=50, width=6, textvariable=p._workers_var).pack(side=tk.LEFT)
+        ttk.Spinbox(opt, from_=1, to=50, width=6,
+                    textvariable=p._workers_var).pack(side=tk.LEFT)
 
-        ttk.Checkbutton(self, text="Safe mode (exclude destructive payloads: DROP/INSERT/UPDATE/exec)",
-                        variable=p._safe_mode_var).pack(anchor="w", padx=10, pady=2)
-        ttk.Checkbutton(self, text="Tamper/WAF-bypass (payload encoders: url / unicode / hex / double-url)",
-                        variable=p._tamper_var).pack(anchor="w", padx=10, pady=2)
-        ttk.Checkbutton(self, text="Smart mutation planner (reduce noise / skip inapplicable combos)",
-                        variable=p._planner_var).pack(anchor="w", padx=10, pady=2)
+        ttk.Checkbutton(
+            adv, text="Safe mode (exclude destructive payloads: DROP/INSERT/UPDATE/exec)",
+            variable=p._safe_mode_var,
+        ).pack(anchor="w", padx=10, pady=2)
+        ttk.Checkbutton(
+            adv, text="Tamper/WAF-bypass (payload encoders: url / unicode / hex / double-url)",
+            variable=p._tamper_var,
+        ).pack(anchor="w", padx=10, pady=2)
+        ttk.Checkbutton(
+            adv, text="Smart mutation planner (reduce noise / skip inapplicable combos)",
+            variable=p._planner_var,
+        ).pack(anchor="w", padx=10, pady=2)
 
+        # 4) Кнопки всегда видны снизу
         btns = ttk.Frame(self)
-        btns.pack(fill=tk.X, padx=8, pady=(6, 10))
-        ttk.Button(btns, text="▶ Start Scan", style="Success.TButton", command=self._start).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=4)
+        btns.pack(fill=tk.X, padx=8, pady=(4, 8), side=tk.BOTTOM)
+        ttk.Button(
+            btns, text="▶ Start Scan", style="Success.TButton", command=self._start,
+        ).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(
+            side=tk.RIGHT, padx=4)
+
+        # 5) Начальное состояние: секции скрыты; сохранённый профиль (если был)
+        self._refresh_content_visibility()
+        saved_profile = ""
+        try:
+            saved_profile = str(
+                getattr(p, "_settings", {}).get("scan_profile", "") or ""
+            ).strip().lower()
+        except Exception:
+            saved_profile = ""
+        if saved_profile in ("quick", "standard", "full"):
+            try:
+                p._scan_profile_var.set(saved_profile)
+            except Exception:
+                pass
+            self._apply_profile(saved_profile, persist=False)
+        else:
+            try:
+                p._scan_profile_var.set("custom")
+            except Exception:
+                pass
+            self._update_profile_description()
 
     def _sync_probe_extra_headers_field(self) -> None:
         """Text (проба-заголовки) → StringVar App (вызывается при старте скана)."""
@@ -1524,6 +1807,16 @@ class ScanConfigWindow(tk.Toplevel):
             pass
 
     def _start(self):
+        # Full — предупреждаем о нагрузке ДО запуска.
+        if self._profile() == "full":
+            if not mb.askyesno(
+                i18n.tr("Full scan"),
+                i18n.tr(
+                    "Full scan: all checks are enabled — this can be slow and "
+                    "noisy. Continue?"
+                ),
+            ):
+                return
         # Сохраняем injection targets/настройки в settings.json перед стартом скана
         # (на случай, если пользователь ввёл значения и сразу нажал Start).
         self._sync_probe_extra_headers_field()
@@ -1592,6 +1885,18 @@ TUTORIAL_STEPS = [
 ]
 
 
+def get_tutorial_steps() -> list[dict]:
+    """Tutorial steps in the current UI language (EN variant for en, RU for ru)."""
+    steps: list[dict] = []
+    for step in TUTORIAL_STEPS:
+        item = dict(step)
+        for key in ("title", "text", "hint", "action_label"):
+            if key in item:
+                item[key] = i18n.tr(item[key])
+        steps.append(item)
+    return steps
+
+
 class TutorialWindow(tk.Toplevel):
     """Интерактивный пошаговый туториал."""
 
@@ -1599,6 +1904,7 @@ class TutorialWindow(tk.Toplevel):
         super().__init__(parent)
         self._parent = parent
         self._step = 0
+        self._steps = get_tutorial_steps()
         tokens = getattr(parent, "_tokens", None) or ui_theme.get_tokens("dark")
         self.configure(bg=tokens.app_bg)
         self.title("Обучение — Notscan")
@@ -1630,11 +1936,14 @@ class TutorialWindow(tk.Toplevel):
         ttk.Button(nav, text="Закрыть", command=self.destroy).pack(side=tk.RIGHT)
 
         self._render()
+        i18n.translate_widget_tree(self)
 
     def _render(self):
-        step = TUTORIAL_STEPS[self._step]
+        step = self._steps[self._step]
         self._title_lbl.configure(text=step["title"])
-        self._progress_lbl.configure(text=f"Шаг {self._step + 1} из {len(TUTORIAL_STEPS)}")
+        self._progress_lbl.configure(
+            text=i18n.tr("Step {n} of {total}", n=self._step + 1, total=len(self._steps))
+        )
         self._text.configure(state=tk.NORMAL)
         self._text.delete("1.0", tk.END)
         self._text.insert("1.0", step["text"])
@@ -1649,14 +1958,14 @@ class TutorialWindow(tk.Toplevel):
         self._action_btn.pack_forget()
         action = step.get("action")
         if action:
-            self._action_btn.configure(text=step.get("action_label", "▶ Выполнить"))
+            self._action_btn.configure(text=i18n.tr(step.get("action_label", "▶ Выполнить")))
             self._action_btn.pack(anchor="w", padx=16, pady=4)
 
         self._back_btn.configure(state=tk.NORMAL if self._step > 0 else tk.DISABLED)
-        self._next_btn.configure(state=tk.DISABLED if self._step == len(TUTORIAL_STEPS) - 1 else tk.NORMAL)
+        self._next_btn.configure(state=tk.DISABLED if self._step == len(self._steps) - 1 else tk.NORMAL)
 
     def _next(self):
-        if self._step < len(TUTORIAL_STEPS) - 1:
+        if self._step < len(self._steps) - 1:
             self._step += 1
             self._render()
 
@@ -1666,7 +1975,7 @@ class TutorialWindow(tk.Toplevel):
             self._render()
 
     def _do_action(self):
-        step = TUTORIAL_STEPS[self._step]
+        step = self._steps[self._step]
         action = step.get("action")
         if not action:
             return
@@ -1692,6 +2001,7 @@ class SessionPickerWindow(tk.Toplevel):
         self.transient(parent)
         self._build()
         self.refresh()
+        i18n.translate_widget_tree(self)
 
     def _build(self) -> None:
         top = ttk.Frame(self)
@@ -1847,6 +2157,8 @@ class App(tk.Tk):
         # Tamper/WAF-bypass: payload-кодирование (TAMPER_MODES из templating).
         self._tamper_var = tk.BooleanVar(value=False)
 
+        # Scan profile (Quick/Standard/Full/Custom) — упрощённый Scan Config.
+        self._scan_profile_var = tk.StringVar(value="custom")
         # Results-пагинация (M2): сколько строк уже загружено из БД / размер страницы.
         self._results_offset = 0
         self._results_page = 1000
@@ -1859,6 +2171,9 @@ class App(tk.Tk):
         self._project_dir = _pm.create_project()
         db.set_db_path(self._project_dir / "history.db")  # also calls init_db()
         self._settings: dict = ui_theme.load_settings(self._project_dir)
+        # i18n: язык читаем ДО построения UI; messagebox-хуки — один раз.
+        i18n.install_messagebox_hooks()
+        i18n.set_language(self._settings.get("ui_language", i18n.DEFAULT_LANGUAGE))
         self._theme_mode = (self._settings.get("theme_mode") or "dark").lower()
         self._tokens = ui_theme.get_tokens(self._theme_mode)
         self.configure(bg=self._tokens.app_bg)
@@ -1874,6 +2189,11 @@ class App(tk.Tk):
             import traceback, sys
             print(f"[PATCH ERROR] Extra tabs failed: {_e}", file=sys.stderr)
             traceback.print_exc()
+        # RU/EN: переводим статические подписи дерева виджетов (ru-режим).
+        try:
+            i18n.translate_widget_tree(self)
+        except Exception:
+            pass
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
 
         # ── Авто-жизненный цикл прокси ─────────────────────
@@ -1898,6 +2218,7 @@ class App(tk.Tk):
         self.after(1000, self._auto_refresh_loop)
 
         self.log(
+            i18n.tr(
             "Добро пожаловать! Как пользоваться:\n"
             "  1) Прокси не запускается сам — нажми «▶ Start Proxy + Browser» (статус в панели Proxy)\n"
             "  2) «▶ Start Proxy + Browser» — открыть браузер через прокси\n"
@@ -1907,6 +2228,7 @@ class App(tk.Tk):
             "    простой (Settings) или закрытие приложения.\n"
             "  ⚠ Для локальных целей (localhost/127.x/10.x/192.168.x)\n"
             "    отключи «Block private/metadata targets» в Settings."
+            )
         )
 
         # Global hotkeys
@@ -1937,6 +2259,10 @@ class App(tk.Tk):
         menubar.add_cascade(label="Help", menu=help_menu)
         try:
             self.config(menu=menubar)
+        except Exception:
+            pass
+        try:
+            i18n.translate_widget_tree(menubar)
         except Exception:
             pass
 
@@ -2485,6 +2811,24 @@ class App(tk.Tk):
         ).pack(side=tk.LEFT, padx=4)
         row += 1
 
+        _lang_row = ttk.Frame(tab)
+        _lang_row.grid(row=row, column=0, columnspan=2, sticky="w", padx=12, pady=2)
+        ttk.Label(_lang_row, text="Language / Язык:").pack(side=tk.LEFT, padx=(0, 8))
+        self._ui_language_var = tk.StringVar(
+            value=i18n.language_label(i18n.normalize_language(
+                self._settings.get("ui_language", i18n.get_language())))
+        )
+        _lang_combo = ttk.Combobox(
+            _lang_row, textvariable=self._ui_language_var, state="readonly", width=12,
+            values=[i18n.LANGUAGE_LABELS["en"], i18n.LANGUAGE_LABELS["ru"]],
+        )
+        _lang_combo.pack(side=tk.LEFT, padx=4)
+        ttk.Label(
+            _lang_row, text="applies after restart", foreground="#a6adc8",
+        ).pack(side=tk.LEFT, padx=8)
+        _lang_combo.bind("<<ComboboxSelected>>", self._on_language_selected)
+        row += 1
+
         ttk.Label(tab, text="Burp Browser settings",
                   font=("Segoe UI", 11, "bold"), foreground="#89b4fa").grid(
             row=row, column=0, columnspan=2, sticky="w", padx=12, pady=(12, 4))
@@ -2642,9 +2986,13 @@ class App(tk.Tk):
             lines = len(text.splitlines()) if p.exists() else 0
             non_comment = sum(1 for l in (text.splitlines() if p.exists() else [])
                               if l.strip() and not l.strip().startswith("#"))
-            ttk.Label(tab, text=f"{pname}:").grid(row=row, column=0, sticky="w", padx=12, pady=1)
-            ttk.Label(tab, text=f"{exists} {fname}  ({non_comment} payloads)", foreground=color).grid(
-                row=row, column=1, sticky="w", padx=6)
+            ttk.Label(tab, text=f"{i18n.tr(pname)}:").grid(
+                row=row, column=0, sticky="w", padx=12, pady=1)
+            ttk.Label(
+                tab,
+                text=f"{exists} {fname}  ({non_comment} {i18n.tr('payloads')})",
+                foreground=color,
+            ).grid(row=row, column=1, sticky="w", padx=6)
             row += 1
 
         # Автосохранение Entry-полей и первичное применение settings к виджетам.
@@ -2840,6 +3188,9 @@ class App(tk.Tk):
                 out["probe_extra_headers"] = [
                     f"{name}: {value}" for name, value in parse_extra_headers(var.get())
                 ]
+            var = getattr(self, "_scan_profile_var", None)
+            if var is not None:
+                out["scan_profile"] = str(var.get() or "custom")
         except Exception:
             pass
         return out
@@ -2940,6 +3291,16 @@ class App(tk.Tk):
                                 "file_upload,ssrf,xxe,deserialization"))
         _set_var("_roe_stop_on_session_drift",
                  bool(settings.get("roe_stop_on_session_drift", True)))
+        _set_var(
+            "_scan_profile_var",
+            str(settings.get("scan_profile", "custom") or "custom").lower(),
+        )
+        _set_var(
+            "_ui_language_var",
+            i18n.language_label(
+                i18n.normalize_language(settings.get("ui_language", i18n.get_language()))
+            ),
+        )
         _set_entry("_burp_browser_path", settings.get("burp_browser_path"))
         _set_entry("_burp_browser_profile", settings.get("burp_browser_profile"))
 
@@ -2987,6 +3348,32 @@ class App(tk.Tk):
             pass
         self._apply_proxy_noise_filter()
 
+    def _on_language_selected(self, _event=None) -> None:
+        """Смена языка в Settings: сохранить в проект, применить после рестарта."""
+        label = ""
+        try:
+            label = self._ui_language_var.get()
+        except Exception:
+            pass
+        code = "ru" if label == i18n.LANGUAGE_LABELS["ru"] else "en"
+        self._settings["ui_language"] = code
+        try:
+            ui_theme.save_settings(self._project_dir, self._settings)
+        except Exception:
+            pass
+        i18n.set_language(code)
+        try:
+            i18n.translate_widget_tree(self)
+        except Exception:
+            pass
+        try:
+            mb.showinfo(
+                i18n.tr("Language / Язык:"),
+                i18n.tr("Language changed — restart the application to apply it."),
+            )
+        except Exception:
+            pass
+
     def _set_proxy_status(self, text: str, running: bool = False) -> None:
         try:
             self._proxy_status_lbl.configure(
@@ -3033,7 +3420,7 @@ class App(tk.Tk):
             free = find_free_port(host, port, attempts=100)
             if free is None:
                 self.log(f"[PROXY][ERR] port {host}:{port} busy — свободных портов не найдено")
-                self._set_proxy_status("● STOPPED (no free port)", running=False)
+                self._set_proxy_status(i18n.tr("● STOPPED (no free port)"), running=False)
                 return False
             self.log(f"[PROXY] port {port} busy → using {free}")
             port = free
@@ -3060,12 +3447,12 @@ class App(tk.Tk):
                 self._proxy_runner.start()
             except Exception as exc:
                 self.log(f"[PROXY][ERR] failed to start proxy: {exc}")
-                self._set_proxy_status("● STOPPED (start failed)", running=False)
+                self._set_proxy_status(i18n.tr("● STOPPED (start failed)"), running=False)
                 return False
 
             self._proxy_confirmed_port = port
             self._proxy_confirmed_host = host
-            self._set_proxy_status(f"● RUNNING :{port}", running=True)
+            self._set_proxy_status(i18n.tr("● RUNNING :{port}", port=port), running=True)
             # Start-кнопка всегда доступна: если прокси уже запущен, она открывает
             # браузер (а при изменённом порте — перезапускает прокси на новом порту).
             try:
@@ -3154,7 +3541,7 @@ class App(tk.Tk):
             self._terminate_browser()
 
         self.log(f"[PROXY] switching {current_host}:{current_port} → {host}:{port} (restart)")
-        self._set_proxy_status(f"● RESTARTING → :{port}", running=False)
+        self._set_proxy_status(i18n.tr("● RESTARTING → :{port}", port=port), running=False)
         try:
             self._btn_start_proxy.configure(state=tk.DISABLED)
         except Exception:
@@ -3193,7 +3580,7 @@ class App(tk.Tk):
         if ok:
             self._schedule_browser_open()
         else:
-            self._set_proxy_status("● STOPPED (restart failed)", running=False)
+            self._set_proxy_status(i18n.tr("● STOPPED (restart failed)"), running=False)
             self.log("[PROXY][ERR] restart failed — проверь host/port и попробуй ещё раз")
 
     def _terminate_browser(self) -> None:
@@ -3225,10 +3612,16 @@ class App(tk.Tk):
         except Exception:
             pass
         if reason == "manual":
-            self._set_proxy_status("● STOPPED", running=False)
+            self._set_proxy_status(i18n.tr("● STOPPED"), running=False)
         else:
-            suffix = f" — port :{port} free" if port else ""
-            self._set_proxy_status(f"● STOPPED ({reason}){suffix}", running=False)
+            suffix = i18n.tr(" — port :{port} free", port=port) if port else ""
+            self._set_proxy_status(
+                i18n.tr(
+                    "● STOPPED ({reason}){suffix}",
+                    reason=i18n.tr(reason), suffix=suffix,
+                ),
+                running=False,
+            )
 
     def _auto_stop_proxy(self, reason: str) -> None:
         """Авто-стоп по жизненному циклу (браузер закрыт / idle)."""
@@ -3242,8 +3635,11 @@ class App(tk.Tk):
             self._btn_start_proxy.configure(state=tk.NORMAL)
         except Exception:
             pass
-        suffix = f" — port :{port} free" if port else ""
-        self._set_proxy_status(f"● STOPPED ({reason}){suffix}", running=False)
+        suffix = i18n.tr(" — port :{port} free", port=port) if port else ""
+        self._set_proxy_status(
+            i18n.tr("● STOPPED ({reason}){suffix}", reason=i18n.tr(reason), suffix=suffix),
+            running=False,
+        )
 
     def _check_browser_exit(self) -> None:
         """Watchdog каждые 2с: браузер закрыт → авто-стоп прокси."""
@@ -3264,9 +3660,9 @@ class App(tk.Tk):
             return
         if self._proxy_runner is not None and self._proxy_runner.is_running:
             self.log("[PROXY] browser closed — stopping proxy automatically")
-            self._auto_stop_proxy("browser closed")
+            self._auto_stop_proxy(i18n.tr("browser closed"))
         else:
-            self._set_proxy_status("● STOPPED (browser closed)", running=False)
+            self._set_proxy_status(i18n.tr("● STOPPED (browser closed)"), running=False)
 
     def _check_idle_stop(self, now: Optional[float] = None) -> None:
         """Idle-автостоп: простой >= proxy_idle_stop_min минут → стоп."""
@@ -3284,7 +3680,9 @@ class App(tk.Tk):
         if should_idle_stop(check_now, last_activity, minutes):
             idle_label = int(minutes) if minutes == int(minutes) else minutes
             self.log(f"[PROXY] idle for ≥{idle_label} min — stopping proxy automatically")
-            self._auto_stop_proxy(f"idle {idle_label} min")
+            self._auto_stop_proxy(
+                i18n.tr("idle {minutes} min", minutes=idle_label)
+            )
 
     def _proxy_watchdog_tick(self) -> None:
         """Периодический watchdog: браузер (2с) и idle (60с)."""
@@ -3342,7 +3740,7 @@ class App(tk.Tk):
                 logger.warning("proxy port %s:%s still busy after stop", host, port)
         except Exception:
             pass
-        self._set_proxy_status("● STOPPED", running=False)
+        self._set_proxy_status(i18n.tr("● STOPPED"), running=False)
 
     def _get_pac_port(self) -> int:
         """Возвращает порт PAC-сервера если прокси запущен, иначе fallback на прокси-порт."""
@@ -3521,6 +3919,11 @@ class App(tk.Tk):
         # ScanConfig, для которых пользователь не нажал Start).
         try:
             self._save_proxy_settings()
+        except Exception:
+            pass
+        try:
+            self._settings["ui_language"] = i18n.get_language()
+            ui_theme.save_settings(self._project_dir, self._settings)
         except Exception:
             pass
         try:
@@ -3882,7 +4285,9 @@ class App(tk.Tk):
         except Exception:
             shown = 0
         try:
-            self._history_count_lbl.configure(text=f"History: {shown} / {total}")
+            self._history_count_lbl.configure(
+                text=i18n.tr("History: {shown} / {total}", shown=shown, total=total)
+            )
         except Exception:
             pass
         try:
@@ -4071,10 +4476,17 @@ class App(tk.Tk):
             total = len(self._check_vars)
             on = sum(1 for v in self._check_vars.values() if v.get())
             workers = self._workers_var.get()
-            safe = "ON" if self._safe_mode_var.get() else "OFF"
-            tamper = "ON" if getattr(self, "_tamper_var", tk.BooleanVar(value=False)).get() else "OFF"
+            safe = i18n.tr("ON") if self._safe_mode_var.get() else i18n.tr("OFF")
+            tamper = (
+                i18n.tr("ON")
+                if getattr(self, "_tamper_var", tk.BooleanVar(value=False)).get()
+                else i18n.tr("OFF")
+            )
             self._scan_summary_lbl.configure(
-                text=f"Checks: {on}/{total}  ·  Workers: {workers}  ·  Safe: {safe}  ·  Tamper: {tamper}"
+                text=i18n.tr(
+                    "Checks: {on}/{total}  ·  Workers: {workers}  ·  Safe: {safe}  ·  Tamper: {tamper}",
+                    on=on, total=total, workers=workers, safe=safe, tamper=tamper,
+                )
             )
         except Exception:
             pass
@@ -4428,7 +4840,7 @@ class App(tk.Tk):
                 total = len(tasks)
                 done = total - remaining
                 self.after(0, lambda: self._scan_progress.configure(
-                    text=f"{done}/{total} tasks"
+                    text=i18n.tr("{done}/{total} tasks", done=done, total=total)
                 ))
                 if remaining > 0 and not runner._stop.is_set():
                     threading.Timer(1.0, _poll).start()
@@ -4449,7 +4861,7 @@ class App(tk.Tk):
         # Не сбрасываем runner сразу: пока воркеры не завершились, смена проекта
         # всё ещё опасна (guard _scan_in_progress держит остаток задач > 0).
         self._btn_run_scan.configure(state=tk.DISABLED)
-        self._scan_progress.configure(text="Stopping…")
+        self._scan_progress.configure(text=i18n.tr("Stopping…"))
         self.log("[SCAN] Stopping…")
 
         def _stop_then_finish():
@@ -4468,7 +4880,7 @@ class App(tk.Tk):
         self._scan_thread = None
         self._btn_run_scan.configure(state=tk.NORMAL)
         self._btn_stop_scan.configure(state=tk.DISABLED)
-        self._scan_progress.configure(text="Done")
+        self._scan_progress.configure(text=i18n.tr("Done"))
         self.log("[SCAN] Finished — refresh Results tab to see findings")
         # M2: новый скан — сброс пагинации Results на первую страницу.
         try:
@@ -4664,7 +5076,9 @@ class App(tk.Tk):
         except Exception:
             total = 0
         try:
-            self._results_count_lbl.configure(text=f"Results: {shown} / {total}")
+            self._results_count_lbl.configure(
+                text=i18n.tr("Results: {shown} / {total}", shown=shown, total=total)
+            )
         except Exception:
             pass
         try:
@@ -4957,28 +5371,36 @@ def _patch_app_with_auth_and_revshell(app: "App") -> None:
     def _refresh_session_view() -> None:
         mgr = getattr(app, "_session_manager", None)
         if mgr is None or not getattr(mgr, "auth_enabled", False):
-            _auth_status_badge.configure(text="  ● INACTIVE  ", bg="#313244", fg="#a6adc8")
+            _auth_status_badge.configure(
+                text="  " + i18n.tr("● INACTIVE") + "  ", bg="#313244", fg="#a6adc8")
             for row_id in _cookie_tree.get_children():
                 _cookie_tree.delete(row_id)
             return
         store = getattr(mgr, "token_store", None)
         if store is None:
-            _auth_status_badge.configure(text="  ● NOT AUTHENTICATED  ", bg="#3a2a1e", fg="#f9e2af")
+            _auth_status_badge.configure(
+                text="  " + i18n.tr("● NOT AUTHENTICATED") + "  ", bg="#3a2a1e", fg="#f9e2af")
             return
         token = getattr(store, "access_token", None)
         cookies = dict(getattr(store, "cookies", {}) or {})
         expired  = getattr(store, "is_expired", lambda: False)()
         relogins = getattr(mgr, "_relogin_count", 0)
-        _relogin_lbl.configure(text=f"Re-logins: {relogins}")
+        _relogin_lbl.configure(
+            text=i18n.tr("Re-logins: {count}", count=relogins)
+        )
         if token:
             if expired:
-                _auth_status_badge.configure(text="  ● EXPIRED  ", bg="#3a1e1e", fg="#f38ba8")
+                _auth_status_badge.configure(
+                    text="  " + i18n.tr("● EXPIRED") + "  ", bg="#3a1e1e", fg="#f38ba8")
             else:
-                _auth_status_badge.configure(text="  ● ACTIVE (token)  ", bg="#1e3a2f", fg="#a6e3a1")
+                _auth_status_badge.configure(
+                    text="  " + i18n.tr("● ACTIVE (token)") + "  ", bg="#1e3a2f", fg="#a6e3a1")
         elif cookies:
-            _auth_status_badge.configure(text="  ● ACTIVE (cookies)  ", bg="#1e3a2f", fg="#a6e3a1")
+            _auth_status_badge.configure(
+                text="  " + i18n.tr("● ACTIVE (cookies)") + "  ", bg="#1e3a2f", fg="#a6e3a1")
         else:
-            _auth_status_badge.configure(text="  ● NOT AUTHENTICATED  ", bg="#3a2a1e", fg="#f9e2af")
+            _auth_status_badge.configure(
+                text="  " + i18n.tr("● NOT AUTHENTICATED") + "  ", bg="#3a2a1e", fg="#f9e2af")
         # Refresh cookie tree
         for row_id in _cookie_tree.get_children():
             _cookie_tree.delete(row_id)
@@ -5426,10 +5848,10 @@ def _patch_app_with_auth_and_revshell(app: "App") -> None:
         return (
             str(_def_attr(defn, "wstg_id", "—") or "—"),
             cid,
-            str(_def_attr(defn, "name", "") or ""),
-            str(_def_attr(defn, "category", "") or ""),
+            i18n.tr(str(_def_attr(defn, "name", "") or "")),
+            i18n.tr(str(_def_attr(defn, "category", "") or "")),
             severity,
-            str(_def_attr(defn, "kind", "") or ""),
+            i18n.tr(str(_def_attr(defn, "kind", "") or "")),
             "✓" if enabled else "✗",
             str(_def_attr(defn, "cwe", "") or "—"),
             str(_def_attr(defn, "description", "") or "")[:90],
@@ -5475,8 +5897,12 @@ def _patch_app_with_auth_and_revshell(app: "App") -> None:
                 )
             )
             _chk_summary_lbl.configure(
-                text=f"{enabled_count} / {len(_catalog_rows)} checks enabled "
-                     f"(catalog: {len(_catalog_rows)})"
+                text=i18n.tr(
+                    "{enabled} / {total} checks enabled (catalog: {catalog})",
+                    enabled=enabled_count,
+                    total=len(_catalog_rows),
+                    catalog=len(_catalog_rows),
+                )
             )
         else:
             for entry in sorted(_FALLBACK_WSTG_CHECKS, key=lambda e: (e[3], e[0])):
@@ -5487,7 +5913,11 @@ def _patch_app_with_auth_and_revshell(app: "App") -> None:
                 1 for e in _FALLBACK_WSTG_CHECKS if _row_enabled(e[0], False)
             )
             _chk_summary_lbl.configure(
-                text=f"{enabled_count} / {len(_FALLBACK_WSTG_CHECKS)} checks enabled"
+                text=i18n.tr(
+                    "{enabled} / {total} checks enabled",
+                    enabled=enabled_count,
+                    total=len(_FALLBACK_WSTG_CHECKS),
+                )
             )
 
     def _toggle_check():
@@ -5637,11 +6067,11 @@ def _patch_app_with_auth_and_revshell(app: "App") -> None:
             if defn is not None:
                 txt = (
                     f"WSTG ID:     {_def_attr(defn, 'wstg_id', '—')}\n"
-                    f"Name:        {_def_attr(defn, 'name', '')}\n"
-                    f"Category:    {_def_attr(defn, 'category', '')}   "
+                    f"Name:        {i18n.tr(str(_def_attr(defn, 'name', '') or ''))}\n"
+                    f"Category:    {i18n.tr(str(_def_attr(defn, 'category', '') or ''))}   "
                     f"Severity: {_def_attr(defn, 'severity', '')}   "
                     f"CWE: {_def_attr(defn, 'cwe', '')}   "
-                    f"Kind: {_def_attr(defn, 'kind', '')}\n"
+                    f"Kind: {i18n.tr(str(_def_attr(defn, 'kind', '') or ''))}\n"
                     f"Description: {_def_attr(defn, 'description', '')}\n"
                 )
                 _detail_text.configure(state=tk.NORMAL)

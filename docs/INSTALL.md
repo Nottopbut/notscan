@@ -40,6 +40,10 @@ python notscan.py
   этого профиля не требуется.
 - Уже накопившийся шум можно удалить кнопкой **🧹 Clear browser noise** в панели
   History (удаляет только известные фоновые домены, остальные записи не трогает).
+- **Язык интерфейса:** Settings → Language (English/Русский). Применяется после
+  перезапуска приложения; отчёты MD/HTML/DOCX локализуются вместе с UI.
+- **DOCX-отчёт:** A4 landscape, фиксированные ширины колонок, повтор шапки,
+  переносы длинных URL — файл читается в Word/LibreOffice без «узких» колонок.
 - **Фильтр фонового шума:** телеметрия Google/Chromium, обновления компонентов,
   safe-browsing и connectivity-check по умолчанию **не попадают в History**
   (`proxy_filter_noise` в Settings; отфильтрованные запросы только считаются в логе).
@@ -68,7 +72,10 @@ python notscan.py
 4. В окне конфигурации: чеки (active/passive/probe), точки мутации (query/form/json/headers),
    Safe Mode, tamper, Smart planner, ROE (конкурентность, RPS, scope allowlist,
    block private/metadata) → **Start Scan**. **Все чеки по умолчанию выключены**
-   (`0 / 43 checks enabled`): включи нужные или нажми **All ON**; бейджи показывают ☐/☑.
+   (`0 / 43 checks enabled`): выбери профиль **Quick/Standard/Full** или раскрой
+   **Customize checks** и включи нужные (**All ON**); бейджи показывают ☐/☑.
+   **Advanced options** (workers, Safe Mode, Tamper, мутации, Injection targets, ROE)
+   по умолчанию свёрнуты — окно остаётся простым.
 5. Результаты — во вкладке **Scan Results** (severity/confidence, evidence, raw HTTP, diff,
    confirm-flow, пагинация). Экспорт: **Export MD / JSON / HTML / SARIF / DOCX**
    (выгружается полный набор результатов).

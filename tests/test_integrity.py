@@ -345,7 +345,8 @@ class TestReportFullExport(_DbTestCase):
             n_html = report_export.export_html(f_html)
             self.assertEqual(n_html, self.expected_findings)
             html = open(f_html, encoding="utf-8").read()
-            self.assertIn(f"Total: {self.N}", html)
+            # Заголовки HTML-отчёта локализуются вместе с UI (default: EN).
+            self.assertIn(f"Total results: {self.N}", html)
 
             n_sarif = report_export.export_sarif(f_sarif)
             self.assertEqual(n_sarif, self.expected_findings)

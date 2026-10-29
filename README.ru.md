@@ -56,6 +56,15 @@
 - **Raw/XML mutation-тип** — для XML/SOAP/PHP-serialized и прочих «сырых» тел добавлена
   мутация `body_raw`, поэтому чеки **XXE** и **insecure deserialization** реально
   генерируют запросы (раньше были декларативными).
+- **Русский/английский интерфейс** — весь GUI (вкладки, кнопки, диалоги, tutorial,
+  названия/описания чеков, статусы) доступен на **русском и английском**; переключатель —
+  Settings → Language (применяется после перезапуска). Отчёты (MD/HTML/DOCX) тоже
+  локализуются; технические строки лога (`[SCAN]/[PROXY]/…`) остаются на английском.
+- **Простые профили скана** — окно скана открывается с выбором **Scan profile**:
+  *Quick* (безопасная разведка passive+probe), *Standard* (рекомендуемые активные чеки
+  + passive/probe), *Full* (все чеки, с предупреждением) или *Custom*. Стена из 43 чеков
+  и advanced-опции (workers, safe mode, tamper, мутации, injection targets, ROE) спрятаны
+  под «Customize checks» / «Advanced options».
 - **Выбор цели инъекции** — в окне скана можно указать, какие заголовки проверяет
   host-header injection (`inject_headers`), ограничить мутации конкретными
   параметрами (`only_params`) и добавить extra-заголовки probe-чеков, например
@@ -99,7 +108,8 @@ python notscan.py
    нажми **＋ Add to Scan list**, затем **▶ Run Scan**.
 4. В окне конфигурации выбери чеки (active/passive/probe), точки мутации и ROE-опции
    (конкурентность, RPS, scope allowlist, Safe Mode, tamper) → **Start Scan**.
-   **По умолчанию все чеки выключены** (в окне скана видно `0 / 43 checks enabled`):
+   **По умолчанию все чеки выключены** (`0 / 43 checks enabled`): выбери **Scan profile**
+   (Quick/Standard/Full) или раскрой **Customize checks** и нажми **All ON**:
    включи нужные или нажми **All ON**; бейджи показывают состояние ☐/☑.
 5. Смотри находки в **Scan Results** (severity, evidence, сырой HTTP, diff, confirm-flow)
    и экспортируй отчёт (MD / JSON / HTML / SARIF / DOCX).
@@ -125,7 +135,7 @@ make smoke    # headless GUI-смоук в xvfb на временной копи
 В репозитории есть самодостаточная HTTP-лаба (`tests/lab/`) с намеренно уязвимыми
 эндпоинтами (reflected XSS, escaped reflection, SQL-ошибки, редиректы, задержки,
 CSRF-форма, JSON API, cookie/CORS/SSRF/SSI-кейсы, чувствительные файлы/metafiles) —
-её используют 403 unit- и интеграционных тестов. Интеграционные тесты прокси
+её используют 493 unit- и интеграционных тестов. Интеграционные тесты прокси
 пропускаются автоматически, если mitmproxy или дисплей недоступны.
 
 ## Структура проекта

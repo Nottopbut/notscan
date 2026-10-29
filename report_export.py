@@ -16,9 +16,51 @@ from typing import Optional
 
 import db
 
+# python-docx нужен только для DOCX-экспорта; импортируем лениво-безопасно,
+# чтобы остальные форматы работали даже без установленного python-docx.
+try:  # pragma: no cover - зависит от окружения
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Cm, Inches, Pt
+    _DOCX_IMPORT_ERROR: Exception | None = None
+except Exception as _exc:  # noqa: BLE001
+    WD_TABLE_ALIGNMENT = None  # type: ignore[assignment]
+    OxmlElement = None  # type: ignore[assignment]
+    qn = None  # type: ignore[assignment]
+    Cm = Inches = Pt = None  # type: ignore[assignment]
+    _DOCX_IMPORT_ERROR = _exc
+
+
+def _require_docx() -> None:
+    if _DOCX_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            "python-docx не установлен. Выполни: pip install python-docx"
+        ) from _DOCX_IMPORT_ERROR
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _t(text: str, **fmt) -> str:
+    """Перевод видимых строк отчёта по текущему языку GUI (fallback — исходник)."""
+    try:
+        import i18n
+        return i18n.tr(text, **fmt)
+    except Exception:
+        try:
+            return str(text).format(**fmt) if fmt else str(text)
+        except Exception:
+            return str(text)
+
+
+def _report_lang() -> str:
+    try:
+        import i18n
+        return i18n.get_language()
+    except Exception:
+        return "en"
 
 
 def _catalog_severity_map() -> dict:
@@ -65,6 +107,56 @@ def _sarif_level(sev: str) -> str:
 
 
 # ──────────────────────────── Рекомендации ────────────────────────────
+
+RECOMMENDATIONS_EN = {
+    "sqli": "Use parameterized queries (prepared statements). Never concatenate user input into SQL.",
+    "sqli_time": "Parameterized queries + DB timeouts. Validate and strictly type input.",
+    "sqli_blind": "Parameterized queries. Do not concatenate input; keep response behavior consistent for boolean conditions.",
+    "cmdi": "Never pass user input to shell/exec. Allowlist commands and separate arguments.",
+    "ssti": "Do not eval user input in templates. Use sandboxing and an expression allowlist.",
+    "xss": "Context-aware output encoding (HTML/JS/attribute). Add CSP and HttpOnly cookies.",
+    "xss_reflected": "Escape reflected output + CSP. Never render user input without encoding.",
+    "xss_dom": "Use safe DOM APIs (textContent instead of innerHTML). Avoid eval/document.write/innerHTML sinks.",
+    "path_traversal": "Canonicalize paths + allowlist. Never accept raw paths from clients.",
+    "xxe": "Disable external entity/DTD processing in the XML parser.",
+    "ssrf": "Allowlist outbound destinations. Block metadata endpoints (169.254.169.254) and validate URLs.",
+    "nosql_injection": "Validate and type input for NoSQL. Never pass raw objects into queries.",
+    "ldap_injection": "Escape LDAP metacharacters or use safe APIs with filters.",
+    "xpath_injection": "Use parameterized XPath expressions instead of string concatenation.",
+    "deserialization": "Never deserialize untrusted data. Allowlist classes and use signatures.",
+    "crlf_injection": "Sanitize CR/LF in headers. Never insert user input into response headers.",
+    "open_redirect": "Allowlist redirect URLs. Never trust next/return/url parameters without validation.",
+    "file_upload": "Validate content type by content (not extension). Store uploads outside the webroot.",
+    "idor": "Enforce object-level authorization. Never trust IDs from URLs.",
+    "jwt": "Verify JWT signatures server-side. Reject alg=none. Use a long random HMAC secret or RS256.",
+    "info_disclosure_paths": "Restrict sensitive paths (actuator, .env, .git, swagger, metrics) or require authorization.",
+    "sqli_confirmed": "Use parameterized queries (prepared statements).",
+    "ssi_injection": "Do not process user input with SSI; encode directives or disable SSI for user data.",
+    "html_injection": "Context-aware HTML output encoding. Never inject user input into HTML unencoded.",
+    "cookies": "Set Secure, HttpOnly and SameSite=Lax/Strict on session cookies; never store secrets in cookies.",
+    "hsts": "Add Strict-Transport-Security (max-age >= 31536000, includeSubDomains) to HTTPS responses.",
+    "csp": "Configure Content-Security-Policy without unsafe-inline/unsafe-eval; use nonces/hashes.",
+    "cache_control": "Use Cache-Control: no-store/private and Pragma: no-cache for session/secret responses.",
+    "insecure_login": "Send credentials only over HTTPS; never submit login forms or Authorization over HTTP.",
+    "browser_storage": "Do not store tokens/secrets in localStorage/sessionStorage; use HttpOnly cookies.",
+    "metafiles": "Review robots.txt/sitemap.xml/security.txt for internal path leaks and remove unnecessary entries.",
+    "ria_policy": "Remove wildcards from crossdomain.xml/clientaccesspolicy.xml; allowlist explicit domains.",
+    "http_methods": "Disable unnecessary HTTP methods (TRACE/PUT/DELETE); keep only those required.",
+    "sensitive_files": "Block access to backups, .env/.git and service files; keep them outside the webroot.",
+    "cors": "Do not reflect arbitrary Origin; never combine Access-Control-Allow-Credentials with wildcard; use an allowlist.",
+    "csrf": "Use CSRF tokens + SameSite cookies. Validate Origin/Referer.",
+    "clickjacking": "Send X-Frame-Options / CSP frame-ancestors.",
+    "security_headers": "Add missing security headers (HSTS, X-Content-Type-Options, CSP, etc.).",
+    "info_disclosure": "Hide versions, internal paths and stack traces in production.",
+    "outdated_libs": "Update outdated JS libraries/frameworks.",
+    "third_party_scripts": "Restrict third-party scripts (SRI, domain allowlist).",
+    "server_fingerprint": "Remove/obfuscate technology version headers (Server, X-Powered-By, X-AspNet-Version) and framework cookies; keep software patched.",
+    "errh": "Show generic error pages in production; keep details in server logs. Disable debug mode and stack traces.",
+    "session_in_url": "Never put session identifiers in URLs; use Secure/HttpOnly/SameSite cookies and regenerate session IDs on login.",
+    "host_header_injection": "Validate/allowlist the Host header and never use it for absolute URLs, password-reset links or cache keys; set a canonical host.",
+}
+
+GENERIC_RECOMMENDATION_EN = "Verify manually and fix according to the OWASP Testing Guide / CWE."
 
 RECOMMENDATIONS = {
     "sqli": "Параметризованные запросы (prepared statements). Не конкатенируй пользовательский ввод в SQL.",
@@ -122,7 +214,10 @@ GENERIC_RECOMMENDATION = "Проверь вручную и устрани в с�
 
 
 def _recommendation_for(check_type: str) -> str:
-    return RECOMMENDATIONS.get((check_type or "").lower(), GENERIC_RECOMMENDATION)
+    ct = (check_type or "").lower()
+    if _report_lang() == "en":
+        return RECOMMENDATIONS_EN.get(ct, GENERIC_RECOMMENDATION_EN)
+    return RECOMMENDATIONS.get(ct, GENERIC_RECOMMENDATION)
 
 
 # ──────────────────────────── Данные отчёта ────────────────────────────
@@ -243,7 +338,7 @@ def export_json(filepath: str | Path, limit: int | None = None, deduplicate: boo
     data = _build_report_data(limit, deduplicate)
     out = {
         "export_time": _now_iso(),
-        "source": "notsca",
+        "source": "notscan",
         "summary": {
             "total": data["total"],
             "findings": data["findings_count"],
@@ -282,29 +377,29 @@ def export_json(filepath: str | Path, limit: int | None = None, deduplicate: boo
 def export_md(filepath: str | Path, limit: int | None = None, deduplicate: bool = True) -> int:
     data = _build_report_data(limit, deduplicate)
     L: list[str] = []
-    L.append("# Notscan Scan Report")
+    L.append(f"# {_t('Notscan Scan Report')}")
     L.append("")
     dedup_note = (
-        f"  |  Unique findings: {data['findings_count']} (raw: {data['findings_raw_count']})"
+        f"  |  {_t('Unique findings')}: {data['findings_count']} ({_t('raw')}: {data['findings_raw_count']})"
         if data.get("deduplicated") else ""
     )
     L.append(
-        f"> Generated: {_now_iso()}  |  Total results: {data['total']}  |  Findings: {data['findings_count']}"
-        f"{dedup_note}"
+        f"> {_t('Generated')}: {_now_iso()}  |  {_t('Total results')}: {data['total']}  |  "
+        f"{_t('Findings')}: {data['findings_count']}{dedup_note}"
     )
     L.append("")
 
-    L.append("## Summary")
+    L.append(f"## {_t('Summary')}")
     L.append("")
-    L.append("| Severity | Count |")
+    L.append(f"| {_t('Severity')} | {_t('Count')} |")
     L.append("|----------|-------|")
     for sev in _SEVERITY_ORDER:
         L.append(f"| {sev.title()} | {data['severity_counts'].get(sev, 0)} |")
     L.append("")
 
-    L.append("## Recommendations (на что обратить внимание)")
+    L.append(f"## {_t('Recommendations')}")
     L.append("")
-    L.append("| Check | Severity | Count | Recommendation |")
+    L.append(f"| {_t('Check')} | {_t('Severity')} | {_t('Count')} | {_t('Recommendation')} |")
     L.append("|-------|----------|-------|----------------|")
     for rec in data["recommendations"]:
         L.append(
@@ -312,19 +407,19 @@ def export_md(filepath: str | Path, limit: int | None = None, deduplicate: bool 
         )
     L.append("")
 
-    L.append("## Detection Matrix (True/False)")
+    L.append(f"## {_t('Detection Matrix (True/False)')}")
     L.append("")
-    L.append("| Check | Detected | Count | Max Severity |")
+    L.append(f"| {_t('Check')} | {_t('Detected')} | {_t('Count')} | {_t('Max Severity')} |")
     L.append("|-------|----------|-------|--------------|")
     for m in data["matrix"]:
-        det = "True" if m["detected"] else "False"
+        det = _t("True") if m["detected"] else _t("False")
         mx = m["max_severity"].title() if m["max_severity"] else "—"
         L.append(f"| {m['check_type']} | {det} | {m['count']} | {mx} |")
     L.append("")
 
-    L.append("## Findings")
+    L.append(f"## {_t('Findings')}")
     L.append("")
-    L.append("| ID | Check | Severity | Method | Count | URL | Evidence |")
+    L.append(f"| ID | {_t('Check')} | {_t('Severity')} | {_t('Method')} | {_t('Count')} | URL | {_t('Evidence')} |")
     L.append("|----|-------|----------|--------|-------|-----|----------|")
     for f in data["findings"]:
         cnt = f.get("occurrences", 1)
@@ -341,76 +436,179 @@ def export_md(filepath: str | Path, limit: int | None = None, deduplicate: bool 
 
 # ──────────────────────────── DOCX ────────────────────────────
 
-def _docx_table(doc, headers: list[str], rows: list[list[str]]) -> None:
+def _soft_break_text(text: str, every: int = 40) -> str:
+    _require_docx()
+    """Вставляет zero-width-space, чтобы длинные URL/токены переносились в Word.
+
+    Без этого Word не рвёт длинные URL/evidence-строки и таблица «разъезжается».
+    """
+    text = str(text or "")
+    if not text:
+        return ""
+    # сначала пробуем рвать по естественным разделителям URL/пути
+    for ch in ("/", "?", "&", "=", ";", ":", ",", "-", "_", "."):
+        text = text.replace(ch, ch + "\u200b")
+    # страховка для совсем длинных слитных токенов
+    out = []
+    for chunk_start in range(0, len(text), every):
+        out.append(text[chunk_start:chunk_start + every])
+    return "\u200b".join(out)
+
+
+def _docx_set_cell_text(cell, value: str, *, bold: bool = False,
+                        size_pt: float = 8.0, soft: bool = True) -> None:
+    """Записывает текст в ячейку с шрифтом/переносами и без лишних отступов."""
+    p = cell.paragraphs[0]
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(0)
+    run = p.add_run(_soft_break_text(value) if soft else str(value or ""))
+    run.bold = bold
+    run.font.size = Pt(size_pt)
+    run.font.name = "Calibri"
+    # узкие поля ячейки, чтобы больше текста помещалось
+    tcPr = cell._tc.get_or_add_tcPr()
+    mar = OxmlElement("w:tcMar")
+    for side in ("top", "bottom", "start", "end"):
+        node = OxmlElement(f"w:{side}")
+        node.set(qn("w:w"), "40" if side in ("top", "bottom") else "70")
+        node.set(qn("w:type"), "dxa")
+        mar.append(node)
+    tcPr.append(mar)
+
+
+def _docx_table(doc, headers: list[str], rows: list[list[str]],
+                widths_in: list[float] | None = None,
+                font_size: float = 8.0,
+                header_fill: str = "D9E2F3") -> None:
+    """Таблица с фиксированной шириной колонок и читаемыми переносами."""
     table = doc.add_table(rows=1, cols=len(headers))
     try:
-        table.style = "Light Grid Accent 1"
+        table.style = "Table Grid"
     except Exception:
         pass
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    # фиксированная раскладка: Word не будет сам сжимать колонки
+    tblPr = table._tbl.tblPr
+    layout = OxmlElement("w:tblLayout")
+    layout.set(qn("w:type"), "fixed")
+    tblPr.append(layout)
+
+    n = len(headers)
+    if widths_in and len(widths_in) == n:
+        widths = [Inches(w) for w in widths_in]
+    else:
+        total = 10.5
+        widths = [Inches(total / max(1, n))] * n
+
+    header_cells = table.rows[0].cells
     for i, h in enumerate(headers):
-        table.rows[0].cells[i].text = h
+        header_cells[i].width = widths[i]
+        _docx_set_cell_text(header_cells[i], str(h), bold=True,
+                            size_pt=font_size + 0.5, soft=False)
+        # фон заголовка
+        tcPr = header_cells[i]._tc.get_or_add_tcPr()
+        shd = OxmlElement("w:shd")
+        shd.set(qn("w:val"), "clear")
+        shd.set(qn("w:color"), "auto")
+        shd.set(qn("w:fill"), header_fill)
+        tcPr.append(shd)
+    # повторять заголовок на каждой странице
+    trPr = table.rows[0]._tr.get_or_add_trPr()
+    tbl_header = OxmlElement("w:tblHeader")
+    tbl_header.set(qn("w:val"), "true")
+    trPr.append(tbl_header)
+
     for row in rows:
         cells = table.add_row().cells
         for i, v in enumerate(row):
-            cells[i].text = str(v)
+            cells[i].width = widths[i]
+            _docx_set_cell_text(cells[i], str(v), size_pt=font_size)
 
 
 def export_docx(filepath: str | Path, limit: int | None = None) -> int:
+    _require_docx()
     try:
         from docx import Document
+        from docx.enum.section import WD_ORIENT
     except ImportError as exc:
         raise RuntimeError("python-docx не установлен. Выполни: pip install python-docx") from exc
 
     data = _build_report_data(limit)
     doc = Document()
-    doc.add_heading("Notscan Scan Report", 0)
+
+    # A4 landscape + узкие поля: таблица находок из 7 колонок становится читаемой
+    section = doc.sections[0]
+    section.orientation = WD_ORIENT.LANDSCAPE
+    section.page_width, section.page_height = section.page_height, section.page_width
+    section.left_margin = section.right_margin = Cm(1.5)
+    section.top_margin = section.bottom_margin = Cm(1.5)
+
+    try:
+        styles = doc.styles
+        normal = styles["Normal"]
+        normal.font.name = "Calibri"
+        normal.font.size = Pt(9)
+    except Exception:
+        pass
+
+    doc.add_heading(_t("Notscan Scan Report"), 0)
     dedup_txt = (
-        f"   |   Unique findings: {data['findings_count']} (raw: {data['findings_raw_count']})"
+        f"   |   {_t('Unique findings')}: {data['findings_count']} ({_t('raw')}: {data['findings_raw_count']})"
         if data.get("deduplicated") else ""
     )
     doc.add_paragraph(
-        f"Generated: {_now_iso()}   |   Total results: {data['total']}   |   Findings: {data['findings_count']}"
-        f"{dedup_txt}"
+        f"{_t('Generated')}: {_now_iso()}   |   {_t('Total results')}: {data['total']}   |   "
+        f"{_t('Findings')}: {data['findings_count']}{dedup_txt}"
     )
 
-    doc.add_heading("Summary", level=1)
+    doc.add_heading(_t("Summary"), level=1)
     _docx_table(
         doc,
-        ["Severity", "Count"],
+        [_t("Severity"), _t("Count")],
         [[sev.title(), str(data["severity_counts"].get(sev, 0))] for sev in _SEVERITY_ORDER],
+        widths_in=[2.2, 1.2],
+        font_size=9,
     )
 
-    doc.add_heading("Recommendations", level=1)
+    doc.add_heading(_t("Recommendations"), level=1)
     _docx_table(
         doc,
-        ["Check", "Severity", "Count", "Recommendation"],
+        [_t("Check"), _t("Severity"), _t("Count"), _t("Recommendation")],
         [
             [rec["check_type"], rec["max_severity"].title(), str(rec["count"]), rec["recommendation"]]
             for rec in data["recommendations"]
         ],
+        widths_in=[1.35, 0.95, 0.7, 7.5],
+        font_size=8.5,
     )
 
-    doc.add_heading("Detection Matrix (True/False)", level=1)
+    doc.add_heading(_t("Detection Matrix (True/False)"), level=1)
     _docx_table(
         doc,
-        ["Check", "Detected", "Count", "Max Severity"],
+        [_t("Check"), _t("Detected"), _t("Count"), _t("Max Severity")],
         [
-            [m["check_type"], "True" if m["detected"] else "False", str(m["count"]),
+            [m["check_type"], _t("True") if m["detected"] else _t("False"), str(m["count"]),
              m["max_severity"].title() if m["max_severity"] else "—"]
             for m in data["matrix"]
         ],
+        widths_in=[1.7, 1.1, 0.9, 1.3],
+        font_size=8.5,
     )
 
-    doc.add_heading("Findings", level=1)
+    doc.add_heading(_t("Findings"), level=1)
+    findings = data["findings"][:2000]
     _docx_table(
         doc,
-        ["ID", "Check", "Severity", "Method", "Count", "URL", "Evidence"],
+        ["ID", _t("Check"), _t("Severity"), _t("Method"), _t("Count"), "URL", _t("Evidence")],
         [
             [str(f["id"]), str(f.get("check_type")), f["severity"].title(),
              str(f.get("method")), str(f.get("occurrences", 1)),
              str(f.get("url", "")), (f.get("evidence") or "")[:300]]
-            for f in data["findings"]
+            for f in findings
         ],
+        widths_in=[0.55, 1.05, 0.75, 0.6, 0.5, 3.25, 3.8],
+        font_size=7.5,
     )
 
     doc.save(filepath)
@@ -429,7 +627,7 @@ def export_html(filepath: str | Path, limit: int | None = None, deduplicate: boo
     vuln_rows = _dedup_findings(findings) if deduplicate else findings
     html_parts = [
         "<!DOCTYPE html><html><head><meta charset='utf-8'>",
-        "<title>Notsca Scan Report</title>",
+        f"<title>{_t('Notscan Scan Report')}</title>",
         "<style>"
         "body{font-family:Segoe UI,sans-serif;background:#1e1e2e;color:#cdd6f4;margin:20px;}",
         "h1{color:#89b4fa;} .meta{color:#a6adc8;margin-bottom:20px;}",
@@ -439,12 +637,12 @@ def export_html(filepath: str | Path, limit: int | None = None, deduplicate: boo
         ".sev-error{color:#f38ba8;} .sev-warning{color:#f9e2af;} .sev-note{color:#a6adc8;}",
         "pre{overflow-x:auto;font-size:12px;}",
         "</style></head><body>",
-        "<h1>Notsca Scan Report</h1>",
-        f"<p class='meta'>Export: {_now_iso()} | Total: {len(rows)} | "
-        f"Unique findings: {len(vuln_rows)} (raw: {raw_count})</p>",
+        f"<h1>{_t('Notscan Scan Report')}</h1>",
+        f"<p class='meta'>{_t('Export')}: {_now_iso()} | {_t('Total results')}: {len(rows)} | "
+        f"{_t('Unique findings')}: {len(vuln_rows)} ({_t('raw')}: {raw_count})</p>",
         "<table><thead><tr>",
-        "<th>ID</th><th>Time</th><th>Check</th><th>Severity</th><th>Method</th><th>Count</th><th>URL</th>",
-        "<th>Payload</th><th>Evidence</th>",
+        f"<th>ID</th><th>{_t('Time')}</th><th>{_t('Check')}</th><th>{_t('Severity')}</th><th>{_t('Method')}</th><th>{_t('Count')}</th><th>URL</th>",
+        f"<th>Payload</th><th>{_t('Evidence')}</th>",
         "</tr></thead><tbody>",
     ]
     for r in vuln_rows:
@@ -493,7 +691,7 @@ def export_sarif(filepath: str | Path, limit: int | None = None, deduplicate: bo
                 }
             }],
             "partialFingerprints": {
-                "notsca/result": r.get("fingerprint") or str(r.get("id", "")),
+                "notscan/result": r.get("fingerprint") or str(r.get("id", "")),
             },
         })
 
@@ -509,9 +707,9 @@ def export_sarif(filepath: str | Path, limit: int | None = None, deduplicate: bo
         "runs": [{
             "tool": {
                 "driver": {
-                    "name": "notsca",
+                    "name": "notscan",
                     "version": "1.0",
-                    "informationUri": "https://github.com/notsca/notsca",
+                    "informationUri": "https://github.com/Nottopbut/notscan",
                     "rules": rules,
                 }
             },

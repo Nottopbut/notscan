@@ -64,6 +64,15 @@ and reports.
 - **Raw/XML body mutations** — XML/SOAP/PHP-serialized and other raw bodies get a
   `body_raw` mutation point, so **XXE** and **insecure deserialization** checks actually
   generate requests (previously declarative-only).
+- **RU/EN interface** — the whole GUI (tabs, buttons, dialogs, tutorial, check names/descriptions,
+  statuses) is available in **English and Russian**; switch it in Settings → Language
+  (applies after restart). Reports (MD/HTML/DOCX) are localised too; technical log lines
+  (`[SCAN]/[PROXY]/…`) stay in English.
+- **Simple scan profiles** — the scan window opens with a **Scan profile** choice:
+  *Quick* (safe passive+probe recon), *Standard* (recommended active checks + passive/probe),
+  *Full* (all checks, with a warning) or *Custom*. The 43-check wall and advanced options
+  (workers, safe mode, tamper, mutation points, injection targets, ROE) are hidden behind
+  «Customize checks» / «Advanced options» toggles.
 - **Injection targets** — in the scan window you can choose which headers host-header
   injection tests (`inject_headers`), limit mutations to specific parameter names
   (`only_params`), and add extra probe headers such as `Cookie: PHPSESSID=...` for
@@ -135,7 +144,7 @@ make smoke    # headless GUI smoke test in xvfb on a temp copy of the project
 The repository ships a self-contained HTTP lab (`tests/lab/`) with intentionally vulnerable
 endpoints (reflected XSS, escaped reflection, SQL errors, redirects, delayed responses,
 CSRF-protected form, JSON API, cookie/CORS/SSRF/SSI cases, sensitive files/metafiles) used
-by 403 unit and integration tests. Proxy-lifecycle integration tests are skipped
+by 493 unit and integration tests. Proxy-lifecycle integration tests are skipped
 automatically when mitmproxy or a display is unavailable.
 
 ## Project structure

@@ -725,6 +725,9 @@ def _fake_app(tmp_path, settings=None):
     app._inject_headers_var = _FakeVar(notscan.DEFAULT_INJECT_HEADERS_STR)
     app._only_params_var = _FakeVar("")
     app._probe_extra_headers_var = _FakeVar("")
+    # task-22: профиль скана + язык (persist/read в _get/_apply_scan_settings).
+    app._scan_profile_var = _FakeVar("custom")
+    app._ui_language_var = _FakeVar("English")
     return app
 
 
@@ -1307,3 +1310,254 @@ def test_gui_injection_targets_kwargs_passed_to_engine_and_probe(tmp_path):
     assert builds[1]["only_params"] is None, builds[1]
     assert probes[1]["host_headers"] is None, probes[1]
     assert not probes[1]["extra_headers"], probes[1]
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Task-22: RU/EN i18n + упрощённый Scan Config (profiles/advanced)
+# ══════════════════════════════════════════════════════════════════
+
+_LANGUAGE_SCRIPT = r"""
+import json, sys
+from pathlib import Path
+sys.path.insert(0, ".")
+import project_manager
+import notscan
+import i18n
+
+root = Path("projects")
+root.mkdir(exist_ok=True)
+ru_proj = root / "i18n_ru_project"
+ru_proj.mkdir(parents=True, exist_ok=True)
+(ru_proj / "settings.json").write_text(
+    json.dumps({"ui_language": "ru"}), encoding="utf-8"
+)
+project_manager.create_project = lambda *a, **k: ru_proj
+
+app = notscan.App()
+app.update()
+
+
+def _all_texts(root_widget):
+    out = []
+    stack = [root_widget]
+    while stack:
+        widget = stack.pop()
+        try:
+            stack.extend(widget.winfo_children())
+        except Exception:
+            pass
+        try:
+            if "text" in widget.keys():
+                text = str(widget.cget("text") or "")
+                if text:
+                    out.append(text)
+        except Exception:
+            pass
+    return out
+
+
+texts = _all_texts(app)
+res = {
+    "lang": i18n.get_language(),
+    "tabs": [app._notebook.tab(t, "text") for t in app._notebook.tabs()],
+    "has_lang_combo": hasattr(app, "_ui_language_var"),
+    "lang_value": app._ui_language_var.get(),
+    "has_settings_ru": any("Настройки" in t for t in texts),
+    "has_scanlist_ru": any(t.strip() == "Список скана" for t in texts),
+    "has_history_ru": any(t.strip() == "История" for t in texts),
+    "summary": app._chk_summary_lbl.cget("text"),
+}
+# смена языка: сохраняется в settings.json (диалог не открываем)
+notscan.mb.showinfo = lambda *a, **k: None
+app._ui_language_var.set(i18n.LANGUAGE_LABELS["ru"])
+app._on_language_selected()
+res["saved_lang"] = json.loads(
+    (ru_proj / "settings.json").read_text(encoding="utf-8")
+)["ui_language"]
+app._proxy_shutdown_done = True
+app.destroy()
+
+# EN — язык по умолчанию (новый проект без settings)
+en_proj = root / "i18n_en_project"
+en_proj.mkdir(parents=True, exist_ok=True)
+project_manager.create_project = lambda *a, **k: en_proj
+app2 = notscan.App()
+app2.update()
+res["default_lang"] = i18n.get_language()
+res["en_tabs"] = [app2._notebook.tab(t, "text") for t in app2._notebook.tabs()]
+res["en_summary"] = app2._chk_summary_lbl.cget("text")
+app2._proxy_shutdown_done = True
+app2.destroy()
+print("RESULT_JSON " + json.dumps(res, ensure_ascii=False))
+print("GUI_OK")
+"""
+
+_UX_PROFILES_SCRIPT = r"""
+import json, sys
+sys.path.insert(0, ".")
+import notscan
+import checks.catalog as catalog
+
+app = notscan.App()
+app.update()
+n = len(catalog.CHECK_CATALOG)
+active = {d.check_id for d in catalog.by_kind("active")}
+passive = {d.check_id for d in catalog.by_kind("passive")}
+probe = {d.check_id for d in catalog.by_kind("probe")}
+standard_active = set(notscan.ScanConfigWindow.STANDARD_ACTIVE_CHECKS) & active
+
+cfg = notscan.ScanConfigWindow(app)
+app.update()
+
+
+def on_ids():
+    return sorted(cid for cid, var in app._check_vars.items() if var.get())
+
+
+res = {
+    "catalog": n,
+    "initial_on": on_ids(),
+    "checks_visible_initial": bool(cfg._checks_frame.winfo_manager()),
+    "advanced_visible_initial": bool(cfg._advanced_frame.winfo_manager()),
+    "profile_initial": app._scan_profile_var.get(),
+    "desc_initial": str(cfg._profile_desc_lbl.cget("text")),
+}
+# Quick
+app._scan_profile_var.set("quick")
+cfg._on_profile_change()
+app.update()
+res["quick_on"] = on_ids()
+res["quick_safe"] = bool(app._safe_mode_var.get())
+# Standard
+app._safe_mode_var.set(False)
+app._scan_profile_var.set("standard")
+cfg._on_profile_change()
+app.update()
+res["standard_on"] = on_ids()
+res["standard_safe"] = bool(app._safe_mode_var.get())
+# Full
+app._scan_profile_var.set("full")
+cfg._on_profile_change()
+app.update()
+res["full_count"] = len(on_ids())
+# Custom не меняет текущий выбор: переключение на Custom ничего не трогает
+app._scan_profile_var.set("custom")
+before = on_ids()
+cfg._on_profile_change()
+app.update()
+res["custom_kept"] = on_ids() == before
+cfg._only(["sqli"])
+app.update()
+# Ручное изменение чеков → профиль Custom
+app._scan_profile_var.set("full")
+cfg._on_profile_change()
+app.update()
+app._check_vars["sqli"].set(False)
+cfg._sync_profile_with_selection()
+res["profile_after_manual"] = app._scan_profile_var.get()
+# Раскрытие секций
+cfg._customize_checks_var.set(True)
+cfg._toggle_checks_section()
+cfg._advanced_var.set(True)
+cfg._toggle_advanced_section()
+app.update()
+res["checks_visible"] = bool(cfg._checks_frame.winfo_manager())
+res["advanced_visible"] = bool(cfg._advanced_frame.winfo_manager())
+# Full: предупреждение при старте (отмена не закрывает окно)
+calls = {"start": 0}
+cfg._on_start = lambda: calls.__setitem__("start", calls["start"] + 1)
+notscan.mb.askyesno = lambda *a, **k: False
+app._scan_profile_var.set("full")
+cfg._on_profile_change()
+cfg._start()
+res["full_cancel_kept_open"] = bool(cfg.winfo_exists())
+res["full_cancel_start"] = calls["start"]
+notscan.mb.askyesno = lambda *a, **k: True
+cfg._start()
+res["full_confirm_start"] = calls["start"]
+res["cfg_destroyed"] = not bool(cfg.winfo_exists())
+res.update({
+    "active": sorted(active),
+    "passive": sorted(passive),
+    "probe": sorted(probe),
+    "standard_active": sorted(standard_active),
+})
+print("RESULT_JSON " + json.dumps(res, ensure_ascii=False))
+app._proxy_shutdown_done = True
+app.destroy()
+print("GUI_OK")
+"""
+
+
+@pytest.mark.integration
+def test_gui_ru_language_and_default_en(tmp_path):
+    """ui_language=ru применяется до UI; по умолчанию — English; выбор сохраняется."""
+    project = _copy_project(tmp_path)
+    data = _run_gui_script(project, _LANGUAGE_SCRIPT, timeout=240)
+
+    # RU-режим: ключевые надписи и вкладки переведены.
+    assert data["lang"] == "ru", data
+    tabs = [t.strip() for t in data["tabs"]]
+    assert "Прокси / Скан" in tabs, tabs
+    assert "Настройки" in tabs, tabs
+    assert "Результаты скана" in tabs, tabs
+    assert "Проверки / WSTG" in tabs, tabs
+    assert data["has_settings_ru"] is True
+    assert data["has_scanlist_ru"] is True
+    assert data["has_history_ru"] is True
+    assert "чеков включено" in data["summary"], data["summary"]
+    assert data["has_lang_combo"] is True
+    assert data["lang_value"] == "Русский"
+    assert data["saved_lang"] == "ru"
+
+    # EN — default (проект без settings.json).
+    assert data["default_lang"] == "en", data
+    en_tabs = [t.strip() for t in data["en_tabs"]]
+    assert "Proxy / Scan" in en_tabs, en_tabs
+    assert "Settings" in en_tabs, en_tabs
+    assert "checks enabled" in data["en_summary"], data["en_summary"]
+
+
+@pytest.mark.integration
+def test_gui_scan_config_profiles_and_hidden_sections(tmp_path):
+    """ScanConfig: профили Quick/Standard/Full/Custom, секции скрыты, Full-warning."""
+    project = _copy_project(tmp_path)
+    data = _run_gui_script(project, _UX_PROFILES_SCRIPT, timeout=240)
+
+    assert data["catalog"] >= 39, data
+    passive_probe = set(data["passive"]) | set(data["probe"])
+    standard_active = set(data["standard_active"])
+
+    # Дефолт: compact-окно, все чеки OFF, обе секции спрятаны, профиль Custom.
+    assert data["initial_on"] == [], data["initial_on"]
+    assert data["checks_visible_initial"] is False
+    assert data["advanced_visible_initial"] is False
+    assert data["profile_initial"] == "custom"
+    assert "Custom" in data["desc_initial"], data["desc_initial"]
+
+    # Quick: все passive+probe, ни одного active, Safe Mode ON.
+    assert set(data["quick_on"]) == passive_probe, data["quick_on"]
+    assert not (set(data["quick_on"]) & set(data["active"]))
+    assert data["quick_safe"] is True
+
+    # Standard: recommended active + все passive/probe, Safe Mode ON.
+    assert set(data["standard_on"]) == passive_probe | standard_active, data["standard_on"]
+    assert standard_active, "в каталоге нет recommended active-чеков"
+    assert data["standard_safe"] is True
+
+    # Full: все чеки.
+    assert data["full_count"] == data["catalog"]
+
+    # Custom не меняет выбор; ручное изменение чеков → Custom.
+    assert data["custom_kept"] is True
+    assert data["profile_after_manual"] == "custom"
+
+    # Секции раскрываются по тумблерам.
+    assert data["checks_visible"] is True
+    assert data["advanced_visible"] is True
+
+    # Full: при старте спрашиваем подтверждение (отмена окно не закрывает).
+    assert data["full_cancel_kept_open"] is True
+    assert data["full_cancel_start"] == 0
+    assert data["full_confirm_start"] == 1
+    assert data["cfg_destroyed"] is True

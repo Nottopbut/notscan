@@ -183,7 +183,8 @@ class TestReportExport(unittest.TestCase):
         self.assertIn("True", text)
         self.assertIn("False", text)
         self.assertIn("Recommendations", text)
-        self.assertIn("Параметризованные", text)  # sqli рекомендация
+        # Рекомендации локализуются вместе с UI (default: EN).
+        self.assertTrue("parameterized" in text.lower() or "параметризован" in text.lower())
         os.remove(f)
 
     def test_json_matrix(self):
