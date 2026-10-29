@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import logging.handlers
 import socket
 import subprocess
@@ -113,6 +114,14 @@ NOISE_HOST_SUFFIXES: tuple[str, ...] = (
     "firefox.settings.services.mozilla.com",
     "incoming.telemetry.mozilla.org",
 )
+
+
+def filter_noise_from_env(default: bool = True) -> bool:
+    """Значение фильтра шума из env (для subprocess-fallback mitmdump)."""
+    raw = os.environ.get("NOTSCAN_PROXY_FILTER_NOISE")
+    if raw is None:
+        return default
+    return str(raw).strip().lower() not in ("0", "false", "no", "off", "")
 
 
 def is_noise_host(host: str) -> bool:
@@ -429,6 +438,7 @@ class ProxyRunner:
         self.port = port
         self.log_cb = log_callback or print
         self.filter_noise = bool(filter_noise)
+        self._logger_addon: Optional[LoggerAddon] = None
 
         # Python-API mode
         self._thread: Optional[threading.Thread] = None
@@ -453,6 +463,23 @@ class ProxyRunner:
         self._stopped_event.set()
 
     # ── public ───────────────────────────────────────────────────────────────
+
+    def set_filter_noise(self, enabled: bool) -> None:
+        """Применить фильтр фонового шума на лету (без перезапуска прокси)."""
+        self.filter_noise = bool(enabled)
+        addon = getattr(self, "_logger_addon", None)
+        if addon is not None:
+            addon.filter_noise = bool(enabled)
+            self.log_cb(
+                f"[PROXY] шумовой фильтр {'включён' if enabled else 'выключен'} (на лету)"
+            )
+        elif self._mode == "subprocess":
+            self.log_cb(
+                "[PROXY][WARN] subprocess-режим: фильтр шума применяется только "
+                "при следующем запуске прокси"
+            )
+        else:
+            self.log_cb("[PROXY] шумовой фильтр применится при следующем запуске прокси")
 
     def _touch_activity(self) -> None:
         """Отметить активность прокси (для idle-автостопа)."""
@@ -662,13 +689,12 @@ class ProxyRunner:
         )
         # Создаём DumpMaster здесь — loop уже running
         self._master = DumpMaster(opts, with_termlog=False, with_dumper=False)
-        self._master.addons.add(
-            LoggerAddon(
-                self.log_cb,
-                on_activity=self._touch_activity,
-                filter_noise=self.filter_noise,
-            )
+        self._logger_addon = LoggerAddon(
+            self.log_cb,
+            on_activity=self._touch_activity,
+            filter_noise=self.filter_noise,
         )
+        self._master.addons.add(self._logger_addon)
 
         self._touch_activity()
         self.log_cb(f"[PROXY] listening on {self.host}:{self.port} (Python API)")
@@ -695,12 +721,15 @@ class ProxyRunner:
             "-s", str(addon_path),
         ]
 
+        env = dict(os.environ)
+        env["NOTSCAN_PROXY_FILTER_NOISE"] = "1" if self.filter_noise else "0"
         try:
             self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                env=env,
             )
             self._touch_activity()
             self.log_cb(
@@ -754,4 +783,4 @@ class ProxyRunner:
 # Когда mitm_proxy.py запускается через `mitmdump -s` (subprocess fallback),
 # mitmproxy ищет модульную переменную `addons`.
 # Без неё fallback перехватывал трафик, но не писал в history.
-addons = [LoggerAddon(log_callback=print)]
+addons = [LoggerAddon(log_callback=print, filter_noise=filter_noise_from_env(True))]

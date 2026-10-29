@@ -53,7 +53,7 @@ class CheckDef:
     description: str
     kind: str            # "active" | "passive" | "probe"
     payload_file: str | None = None   # только для active, имя файла в payloads/
-    enabled_default: bool = True
+    enabled_default: bool = False
 
 
 # ══════════════════════════════════════════════════════════════════

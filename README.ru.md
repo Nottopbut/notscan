@@ -53,8 +53,10 @@
   (baseline / benign / suspicious replay), пагинация результатов.
 - **Отчёты** — Markdown, JSON, HTML, SARIF, DOCX; по умолчанию выгружается полный набор
   результатов (без молчаливой обрезки).
-- **Payload-наборы** — ~3.3 тыс. payload'ов в 19 наборах (включая true/false пары для
-  boolean-blind SQLi); Safe Mode фильтрует
+- **Payload-наборы** — ~3.6 тыс. payload'ов в 19 наборах с отдельными
+  **WAF-bypass-вариантами** (обфускация регистром/комментариями, encoding/HTML-entity/
+  unicode-трюки, IP-представления) в каждом инъекционном наборе (включая true/false
+  пары для boolean-blind SQLi); Safe Mode фильтрует
   деструктивные. См. [`payloads/README.md`](payloads/README.md).
 - **Проекты** — каждый запуск работает в своём каталоге проекта со своей БД, настройками
   и отчётами; переключение — **Project → Sessions / Projects…**. Смена проекта блокируется
@@ -90,6 +92,8 @@ python notscan.py
    нажми **＋ Add to Scan list**, затем **▶ Run Scan**.
 4. В окне конфигурации выбери чеки (active/passive/probe), точки мутации и ROE-опции
    (конкурентность, RPS, scope allowlist, Safe Mode, tamper) → **Start Scan**.
+   **По умолчанию все чеки выключены** (в окне скана видно `0 / 39 checks enabled`):
+   включи нужные или нажми **All ON**; бейджи показывают состояние ☐/☑.
 5. Смотри находки в **Scan Results** (severity, evidence, сырой HTTP, diff, confirm-flow)
    и экспортируй отчёт (MD / JSON / HTML / SARIF / DOCX).
 
@@ -114,7 +118,7 @@ make smoke    # headless GUI-смоук в xvfb на временной копи
 В репозитории есть самодостаточная HTTP-лаба (`tests/lab/`) с намеренно уязвимыми
 эндпоинтами (reflected XSS, escaped reflection, SQL-ошибки, редиректы, задержки,
 CSRF-форма, JSON API, cookie/CORS/SSRF/SSI-кейсы, чувствительные файлы/metafiles) —
-её используют 369 unit- и интеграционных тестов. Интеграционные тесты прокси
+её используют 398 unit- и интеграционных тестов. Интеграционные тесты прокси
 пропускаются автоматически, если mitmproxy или дисплей недоступны.
 
 ## Структура проекта

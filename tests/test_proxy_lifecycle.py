@@ -406,3 +406,41 @@ def test_logger_addon_filters_noise_without_db():
     # без БД он упадёт; проверяем только флаг).
     off = mitm_proxy.LoggerAddon(log_callback=lambda _s: None, filter_noise=False)
     assert off.filter_noise is False
+
+
+# ──────────── live-применение фильтра шума ────────────
+
+def test_filter_noise_from_env(monkeypatch):
+    import mitm_proxy
+
+    monkeypatch.delenv("NOTSCAN_PROXY_FILTER_NOISE", raising=False)
+    assert mitm_proxy.filter_noise_from_env(True) is True
+    assert mitm_proxy.filter_noise_from_env(False) is False
+    for raw, expected in [("0", False), ("false", False), ("off", False),
+                          ("1", True), ("true", True), ("yes", True)]:
+        monkeypatch.setenv("NOTSCAN_PROXY_FILTER_NOISE", raw)
+        assert mitm_proxy.filter_noise_from_env(True) is expected, raw
+
+
+def test_proxy_runner_set_filter_noise_live():
+    import mitm_proxy
+
+    logs: list[str] = []
+    runner = mitm_proxy.ProxyRunner(log_callback=logs.append, filter_noise=True)
+
+    class _Addon:
+        filter_noise = True
+
+    addon = _Addon()
+    runner._logger_addon = addon  # noqa: SLF001 — проверяем live-применение
+    runner.set_filter_noise(False)
+    assert runner.filter_noise is False
+    assert addon.filter_noise is False
+    assert any("на лету" in line for line in logs)
+
+    # Без API-addon (subprocess/до старта) — не падаем, логируем причину.
+    runner._logger_addon = None
+    runner._mode = "subprocess"
+    runner.set_filter_noise(True)
+    assert runner.filter_noise is True
+    assert any("subprocess" in line for line in logs)

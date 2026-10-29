@@ -20,6 +20,7 @@ import tkinter.ttk as ttk
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 
 def _check_deps() -> None:
@@ -1000,37 +1001,37 @@ BADGE_COLORS = {
 }
 
 SERVER_BADGES = [
-    ("sqli", "SQLi Error", True),
-    ("sqli_time", "SQLi Time", True),
-    ("cmdi", "CMDi", True),
-    ("ssti", "SSTI", True),
-    ("xxe", "XXE", True),
-    ("ssrf", "SSRF", True),
-    ("nosql_injection", "NoSQLi", True),
-    ("ldap_injection", "LDAPi", True),
-    ("xpath_injection", "XPathi", True),
-    ("deserialization", "Deserial", True),
-    ("path_traversal", "Path Traversal", True),
-    ("crlf_injection", "CRLF/Header", True),
-    ("file_upload", "File Upload", True),
-    ("idor", "IDOR", True),
+    ("sqli", "SQLi Error", False),
+    ("sqli_time", "SQLi Time", False),
+    ("cmdi", "CMDi", False),
+    ("ssti", "SSTI", False),
+    ("xxe", "XXE", False),
+    ("ssrf", "SSRF", False),
+    ("nosql_injection", "NoSQLi", False),
+    ("ldap_injection", "LDAPi", False),
+    ("xpath_injection", "XPathi", False),
+    ("deserialization", "Deserial", False),
+    ("path_traversal", "Path Traversal", False),
+    ("crlf_injection", "CRLF/Header", False),
+    ("file_upload", "File Upload", False),
+    ("idor", "IDOR", False),
 ]
 
 CLIENT_BADGES = [
-    ("xss_reflected", "XSS Reflected", True),
-    ("xss_dom", "XSS DOM", True),
-    ("csrf", "CSRF", True),
-    ("open_redirect", "Open Redirect", True),
-    ("clickjacking", "Clickjacking", True),
-    ("security_headers", "Sec Headers", True),
-    ("info_disclosure", "Info Leak", True),
-    ("outdated_libs", "Outdated Libs", True),
-    ("third_party_scripts", "3rd-party JS", True),
+    ("xss_reflected", "XSS Reflected", False),
+    ("xss_dom", "XSS DOM", False),
+    ("csrf", "CSRF", False),
+    ("open_redirect", "Open Redirect", False),
+    ("clickjacking", "Clickjacking", False),
+    ("security_headers", "Sec Headers", False),
+    ("info_disclosure", "Info Leak", False),
+    ("outdated_libs", "Outdated Libs", False),
+    ("third_party_scripts", "3rd-party JS", False),
 ]
 
 OTHER_BADGES = [
-    ("jwt", "JWT Signature", True),
-    ("info_disclosure_paths", "Info Disclosure (paths)", True),
+    ("jwt", "JWT Signature", False),
+    ("info_disclosure_paths", "Info Disclosure (paths)", False),
 ]
 
 
@@ -1155,7 +1156,7 @@ def check_var_defs() -> list[tuple[str, bool]]:
             cid = str(_def_attr(d, "check_id", ""))
             if not cid:
                 continue
-            out.append((cid, bool(_def_attr(d, "enabled_default", True))))
+            out.append((cid, bool(_def_attr(d, "enabled_default", False))))
         return out
     return [(cid, on) for cid, _lbl, on in SERVER_BADGES + CLIENT_BADGES + OTHER_BADGES]
 
@@ -1214,6 +1215,7 @@ class ScanConfigWindow(tk.Toplevel):
         self._parent = parent
         self._on_start = on_start
         self._badges: dict[str, tk.Label] = {}
+        self._badge_labels: dict[str, str] = {}
         self._check_widgets: dict[str, ttk.Checkbutton] = {}
         tokens = getattr(parent, "_tokens", None) or ui_theme.get_tokens("dark")
         self.configure(bg=tokens.app_bg)
@@ -1226,15 +1228,36 @@ class ScanConfigWindow(tk.Toplevel):
         except Exception:
             pass
 
+    def _badge_text(self, cid: str, enabled: bool) -> str:
+        """Текст бейджа: текстовый индикатор ON/OFF + короткая подпись."""
+        return f"{'☑' if enabled else '☐'} {self._badge_labels.get(cid, cid)}"
+
+    def _refresh_badge(self, cid: str, enabled: bool) -> None:
+        """Обновляет цвет и текст бейджа под состояние enabled."""
+        badge = self._badges.get(cid)
+        if badge is None:
+            return
+        on_bg, on_fg = BADGE_COLORS.get(cid, ("#585b70", "#cdd6f4"))
+        try:
+            badge.configure(
+                text=self._badge_text(cid, enabled),
+                bg=on_bg if enabled else "#313244",
+                fg=on_fg if enabled else "#585b70",
+            )
+        except tk.TclError:
+            pass
+
     def _badge(self, frame, cid, label, row, col):
         var = self._parent._check_vars.get(cid)
         if var is None:
-            var = tk.BooleanVar(value=True)
+            # Все чеки по умолчанию выключены (catalog.enabled_default=False).
+            var = tk.BooleanVar(value=False)
             self._parent._check_vars[cid] = var
+        self._badge_labels[cid] = label
         on_bg, on_fg = BADGE_COLORS.get(cid, ("#585b70", "#cdd6f4"))
         off_bg, off_fg = "#313244", "#585b70"
         badge = tk.Label(
-            frame, text=label, font=("Segoe UI", 9, "bold"),
+            frame, text=self._badge_text(cid, var.get()), font=("Segoe UI", 9, "bold"),
             padx=8, pady=4, relief="flat", cursor="hand2",
             bg=on_bg if var.get() else off_bg,
             fg=on_fg if var.get() else off_fg,
@@ -1242,7 +1265,7 @@ class ScanConfigWindow(tk.Toplevel):
         def _toggle(_e=None):
             val = not var.get()
             var.set(val)
-            badge.configure(bg=on_bg if val else off_bg, fg=on_fg if val else off_fg)
+            self._refresh_badge(cid, val)
         badge.bind("<Button-1>", _toggle)
         badge.grid(row=row, column=col, padx=3, pady=3, sticky="ew")
         self._badges[cid] = badge
@@ -1250,10 +1273,7 @@ class ScanConfigWindow(tk.Toplevel):
     def _set_all(self, value: bool):
         for cid, var in self._parent._check_vars.items():
             var.set(value)
-            b = self._badges.get(cid)
-            if b:
-                on_bg, on_fg = BADGE_COLORS.get(cid, ("#585b70", "#cdd6f4"))
-                b.configure(bg=on_bg if value else "#313244", fg=on_fg if value else "#585b70")
+            self._refresh_badge(cid, value)
 
     def _only(self, ids):
         self._set_all(False)
@@ -1261,10 +1281,7 @@ class ScanConfigWindow(tk.Toplevel):
             var = self._parent._check_vars.get(cid)
             if var is not None:
                 var.set(True)
-            b = self._badges.get(cid)
-            if b:
-                on_bg, on_fg = BADGE_COLORS.get(cid, ("#585b70", "#cdd6f4"))
-                b.configure(bg=on_bg, fg=on_fg)
+            self._refresh_badge(cid, True)
 
     def _badge_section(self, title: str, items, cols: int = 5) -> None:
         """Секция кликабельных бейджей (active-чеки из каталога)."""
@@ -1282,7 +1299,7 @@ class ScanConfigWindow(tk.Toplevel):
         for i, (cid, lbl) in enumerate(items):
             var = self._parent._check_vars.get(cid)
             if var is None:
-                var = tk.BooleanVar(value=True)
+                var = tk.BooleanVar(value=False)
                 self._parent._check_vars[cid] = var
             cb = ttk.Checkbutton(lf, text=lbl, variable=var)
             cb.grid(row=i // cols, column=i % cols, sticky="w", padx=4, pady=2)
@@ -1837,6 +1854,13 @@ class App(tk.Tk):
         self._project_dir = proj_dir
         db.set_db_path(proj_dir / "history.db")
         self._settings = ui_theme.load_settings(proj_dir)
+        # Настройки проекта: перечитываем виджеты Settings (иначе UI показывал
+        # значения прошлого проекта) и применяем живой фильтр шума к прокси.
+        try:
+            self._apply_settings_to_ui()
+            self._apply_proxy_noise_filter()
+        except Exception:
+            pass
         self._scan_list.clear()
         self._contracts_map = None
         if getattr(self, "_session_manager", None):
@@ -2361,6 +2385,7 @@ class App(tk.Tk):
             tab,
             text="Block private/metadata targets (localhost, 127.x, 10.x, 192.168.x, 169.254.169.254)",
             variable=self._scope_block_private_var,
+            command=self._save_proxy_settings,
         ).grid(row=row, column=0, columnspan=2, sticky="w", padx=12, pady=2)
         row += 1
 
@@ -2379,6 +2404,7 @@ class App(tk.Tk):
             tab,
             text="Stop scan on session drift (401/403, redirect to login, login-page content)",
             variable=self._roe_stop_on_session_drift,
+            command=self._save_proxy_settings,
         ).grid(row=row, column=0, columnspan=2, sticky="w", padx=12, pady=2)
         row += 1
 
@@ -2430,6 +2456,10 @@ class App(tk.Tk):
             ttk.Label(tab, text=f"{exists} {fname}  ({non_comment} payloads)", foreground=color).grid(
                 row=row, column=1, sticky="w", padx=6)
             row += 1
+
+        # Автосохранение Entry-полей и первичное применение settings к виджетам.
+        self._bind_settings_autosave()
+        self._apply_settings_to_ui()
 
     def _open_payload_viewer(self) -> None:
         """Окно просмотра состава словарей (payloads/*.txt)."""
@@ -2582,12 +2612,138 @@ class App(tk.Tk):
             pass
         return opts
 
+    def _get_scan_settings(self) -> dict:
+        """Scan scope / ROE / Burp browser поля из Settings tab (для персиста)."""
+        out: dict = {}
+        try:
+            entry = getattr(self, "_scope_allowlist_entry", None)
+            if entry is not None:
+                out["scope_allowlist"] = (entry.get() or "").strip()
+            var = getattr(self, "_scope_block_private_var", None)
+            if var is not None:
+                out["scope_block_private"] = bool(var.get())
+            entry = getattr(self, "_roe_max_rps_entry", None)
+            if entry is not None:
+                out["roe_max_rps"] = (entry.get() or "0").strip()
+            entry = getattr(self, "_roe_block_checks_entry", None)
+            if entry is not None:
+                out["roe_block_checks"] = (entry.get() or "").strip()
+            var = getattr(self, "_roe_stop_on_session_drift", None)
+            if var is not None:
+                out["roe_stop_on_session_drift"] = bool(var.get())
+            entry = getattr(self, "_burp_browser_path", None)
+            if entry is not None:
+                out["burp_browser_path"] = (entry.get() or "").strip()
+            entry = getattr(self, "_burp_browser_profile", None)
+            if entry is not None:
+                out["burp_browser_profile"] = (entry.get() or "").strip()
+        except Exception:
+            pass
+        return out
+
+    def _apply_proxy_noise_filter(self, desired: bool | None = None) -> None:
+        """Применяет настройку фильтра шума к запущенному прокси (без рестарта).
+
+        Использует ProxyRunner.set_filter_noise(); если метод недоступен
+        (старый объект/другой режим) — честно логируем, что нужен перезапуск.
+        """
+        try:
+            runner = getattr(self, "_proxy_runner", None)
+            if runner is None or not bool(getattr(runner, "is_running", False)):
+                return
+            if desired is None:
+                desired = bool(self._get_proxy_settings().get("proxy_filter_noise", True))
+            desired = bool(desired)
+            current = bool(getattr(runner, "filter_noise", not desired))
+            if current == desired:
+                return
+            setter = getattr(runner, "set_filter_noise", None)
+            if callable(setter):
+                setter(desired)
+                self.log(
+                    "[PROXY] фильтр шума применён на лету (без перезапуска прокси)"
+                )
+            else:
+                self.log(
+                    "[PROXY] фильтр шума применится после перезапуска прокси "
+                    "(у текущего runner нет set_filter_noise)"
+                )
+        except Exception as exc:
+            self.log(f"[PROXY][WARN] не удалось применить фильтр шума на лету: {exc}")
+
+    def _apply_settings_to_ui(self) -> None:
+        """Перечитывает self._settings в виджеты Settings tab (старт/смена проекта)."""
+        settings = dict(getattr(self, "_settings", {}) or {})
+
+        def _set_var(attr: str, value) -> None:
+            var = getattr(self, attr, None)
+            if var is None or value is None:
+                return
+            try:
+                var.set(value)
+            except Exception:
+                pass
+
+        def _set_entry(attr: str, value) -> None:
+            widget = getattr(self, attr, None)
+            if widget is None or value is None:
+                return
+            try:
+                widget.delete(0, tk.END)
+                widget.insert(0, str(value))
+            except Exception:
+                pass
+
+        opts = proxy_settings(settings)
+        _set_var("_proxy_autostart_var", bool(opts.get("proxy_autostart", False)))
+        _set_var("_proxy_filter_noise_var", bool(opts.get("proxy_filter_noise", True)))
+        _set_var("_proxy_stop_on_browser_exit_var",
+                 bool(opts.get("proxy_stop_on_browser_exit", True)))
+        try:
+            _idle = float(opts.get("proxy_idle_stop_min", 15) or 0)
+            _set_var("_proxy_idle_min_var", str(int(_idle)))
+        except (TypeError, ValueError):
+            _set_var("_proxy_idle_min_var", "15")
+
+        _set_entry("_scope_allowlist_entry", settings.get("scope_allowlist", ""))
+        _set_var("_scope_block_private_var",
+                 bool(settings.get("scope_block_private", True)))
+        _set_entry("_roe_max_rps_entry", settings.get("roe_max_rps", "0"))
+        _set_entry("_roe_block_checks_entry",
+                   settings.get("roe_block_checks",
+                                "file_upload,ssrf,xxe,deserialization"))
+        _set_var("_roe_stop_on_session_drift",
+                 bool(settings.get("roe_stop_on_session_drift", True)))
+        _set_entry("_burp_browser_path", settings.get("burp_browser_path"))
+        _set_entry("_burp_browser_profile", settings.get("burp_browser_profile"))
+
+    def _bind_settings_autosave(self) -> None:
+        """FocusOut-автосохранение текстовых полей Settings tab."""
+        for attr in (
+            "_burp_browser_path", "_burp_browser_profile",
+            "_scope_allowlist_entry", "_roe_max_rps_entry", "_roe_block_checks_entry",
+        ):
+            widget = getattr(self, attr, None)
+            if widget is None:
+                continue
+            try:
+                widget.bind("<FocusOut>", lambda _e: self._save_proxy_settings())
+            except Exception:
+                pass
+
     def _save_proxy_settings(self) -> None:
+        """Сохраняет настройки прокси/scope/ROE в проект и применяет live-часть.
+
+        proxy_filter_noise применяется к уже запущенному прокси сразу (без
+        перезапуска), остальные настройки вступают в силу со следующего скана.
+        """
         try:
             self._settings.update(self._get_proxy_settings())
+            self._settings.update(self._get_scan_settings())
             ui_theme.save_settings(self._project_dir, self._settings)
         except Exception:
             pass
+        self._apply_proxy_noise_filter()
 
     def _set_proxy_status(self, text: str, running: bool = False) -> None:
         try:
@@ -3112,32 +3268,79 @@ class App(tk.Tk):
 
         Нужно для проектов, в историю которых шум попал ДО включения фильтра
         proxy_filter_noise (новые такие запросы в History не пишутся).
+
+        Шум может лежать и СТАРШЕ последних 10000 записей, поэтому листаем всю
+        History лёгкими страницами (id+url, без BLOB) через db.fetch_history_refs
+        и собираем кандидатов со всех страниц. Safety: не больше 1000 страниц.
         """
+        batch_limit = 10000
+        max_pages = 1000  # safety: ~10M строк истории
+
+        def _noise_ids(rows: list[dict]) -> list[int]:
+            ids: list[int] = []
+            for row in rows:
+                try:
+                    host = urlparse(row.get("url") or "").hostname or ""
+                except Exception:
+                    host = ""
+                if host and is_noise_host(host):
+                    ids.append(int(row["id"]))
+            return ids
+
+        noise_ids: list[int] = []
+        scanned = 0
+        pages = 0
         try:
-            rows = db.fetch_history(limit=10000)
+            for _ in range(max_pages):
+                page = db.fetch_history_refs(limit=batch_limit, offset=scanned)
+                if not page:
+                    break
+                pages += 1
+                noise_ids.extend(_noise_ids(page))
+                scanned += len(page)
+                if len(page) < batch_limit:
+                    break
         except Exception as exc:
             mb.showerror("Clear browser noise", str(exc))
             return
-        noise_ids = []
-        for row in rows:
-            try:
-                host = urlparse(row.get("url") or "").hostname or ""
-            except Exception:
-                host = ""
-            if host and is_noise_host(host):
-                noise_ids.append(int(row["id"]))
         if not noise_ids:
             self.log("[HISTORY] Фонового шума браузера в History не найдено")
             return
         if not mb.askyesno(
             "Clear browser noise",
             f"Найдено фоновых запросов браузера (Google/обновления и т.п.): "
-            f"{len(noise_ids)}.\nУдалить их из History?",
+            f"{len(noise_ids)} (просмотрено записей: {scanned}).\n"
+            "Удалить их из History?",
         ):
             return
-        deleted = db.delete_history_ids(noise_ids)
+        try:
+            deleted = int(db.delete_history_ids(noise_ids) or 0)
+        except Exception as exc:
+            mb.showerror("Clear browser noise", str(exc))
+            return
+
+        # Убираем удалённые из History записи и из Scan list (иначе скан
+        # пытался бы построить задачи по несуществующим history_id).
+        if noise_ids and getattr(self, "_scan_list", None):
+            removed = set(noise_ids)
+            for hid in list(self._scan_list.keys()):
+                if hid in removed:
+                    self._scan_list.pop(hid, None)
+            try:
+                self._refresh_scanlist()
+            except Exception:
+                pass
+
         self._refresh_history()
-        self.log(f"[HISTORY] Удалено фоновых запросов: {deleted}")
+        self.log(
+            f"[HISTORY] Удалено фоновых запросов: {deleted} "
+            f"(просмотрено записей: {scanned}, страниц: {pages})"
+        )
+        if pages >= max_pages:
+            self.log(
+                f"[HISTORY][WARN] Просмотрено {pages} страниц — возможно, "
+                "шум остался; запусти очистку ещё раз"
+            )
 
     def _clear_history(self) -> None:
         if not mb.askyesno("Clear history", "Удалить всю историю запросов?"):
@@ -4867,8 +5070,18 @@ def _patch_app_with_auth_and_revshell(app: "App") -> None:
     _catalog_rows = catalog_defs()  # [] → fallback-режим
     _use_catalog = bool(_catalog_rows)
 
-    def _row_enabled(check_id: str, default: bool = True) -> bool:
-        """Текущее enabled-состояние: registry → GUI-чекбокс → default."""
+    def _row_enabled(check_id: str, default: bool = False) -> bool:
+        """Текущее enabled-состояние: GUI-чекбокс → registry → default.
+
+        GUI-переменная — источник правды (по умолчанию все чеки выключены);
+        registry — fallback для чеков без GUI-переменной.
+        """
+        var = app._check_vars.get(check_id)
+        if var is not None:
+            try:
+                return bool(var.get())
+            except Exception:
+                return default
         try:
             from checks.registry import get_registry
             chk = get_registry().get(check_id)
@@ -4876,18 +5089,12 @@ def _patch_app_with_auth_and_revshell(app: "App") -> None:
                 return bool(chk.enabled)
         except Exception:
             pass
-        var = app._check_vars.get(check_id)
-        if var is not None:
-            try:
-                return bool(var.get())
-            except Exception:
-                return default
         return default
 
     def _catalog_values(defn) -> tuple:
         cid = str(_def_attr(defn, "check_id", ""))
         severity = str(_def_attr(defn, "severity", "INFO") or "INFO")
-        enabled = _row_enabled(cid, bool(_def_attr(defn, "enabled_default", True)))
+        enabled = _row_enabled(cid, bool(_def_attr(defn, "enabled_default", False)))
         return (
             str(_def_attr(defn, "wstg_id", "—") or "—"),
             cid,
@@ -4902,7 +5109,7 @@ def _patch_app_with_auth_and_revshell(app: "App") -> None:
 
     def _fallback_values(entry) -> tuple:
         cid = entry[0]
-        enabled = _row_enabled(cid, True)
+        enabled = _row_enabled(cid, False)
         if cid == "info_disclosure_paths":
             kind = "probe"
         elif cid in _LEGACY_PASSIVE_CHECK_IDS:
@@ -4936,7 +5143,7 @@ def _patch_app_with_auth_and_revshell(app: "App") -> None:
                 1 for d in _catalog_rows
                 if _row_enabled(
                     str(_def_attr(d, "check_id", "")),
-                    bool(_def_attr(d, "enabled_default", True)),
+                    bool(_def_attr(d, "enabled_default", False)),
                 )
             )
             _chk_summary_lbl.configure(
@@ -4949,7 +5156,7 @@ def _patch_app_with_auth_and_revshell(app: "App") -> None:
                 tag = values[4].lower() if values[6] == "✓" else "off"
                 chk_tree.insert("", tk.END, iid=values[1], tags=(tag,), values=values)
             enabled_count = sum(
-                1 for e in _FALLBACK_WSTG_CHECKS if _row_enabled(e[0], True)
+                1 for e in _FALLBACK_WSTG_CHECKS if _row_enabled(e[0], False)
             )
             _chk_summary_lbl.configure(
                 text=f"{enabled_count} / {len(_FALLBACK_WSTG_CHECKS)} checks enabled"

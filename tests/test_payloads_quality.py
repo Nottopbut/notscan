@@ -9,7 +9,9 @@ Payloads quality tests.
   • новые файлы ssi.txt / html_injection.txt в ожидаемом формате (маркеры, не-XSS);
   • `scanner_core.load_payloads` парсит все файлы, safe_mode отсекает только деструктивное;
   • time-based payload'ы синхронизированы с SQLI_TIME_PAYLOADS;
-  • payload-файлы из checks/catalog.py (если каталог уже есть) существуют и непустые.
+  • payload-файлы из checks/catalog.py (если каталог уже есть) существуют и непустые;
+  • WAF-bypass секции (`# --- WAF bypass ---`) есть в ключевых наборах, содержат
+    payload'ы, репрезентативные обфускации и только не-деструктивные строки.
 """
 
 import re
@@ -24,23 +26,100 @@ sys.path.insert(0, str(ROOT))
 import scanner_core  # noqa: E402
 
 # Минимальные объёмы payload-наборов (защита от случайного отката баз).
+# Значения 2026-10-29 включают WAF-bypass секции (task-16): старые минимумы
+# подняты на число добавленных обфусцированных вариантов.
 MIN_PAYLOAD_COUNTS = {
-    "cmdi.txt": 538,
-    "crlf.txt": 27,
-    "deserialization.txt": 14,
-    "file_upload.txt": 32,
-    "idor.txt": 24,
-    "ldapi.txt": 51,
-    "nosqli.txt": 56,
-    "open_redirect.txt": 280,
-    "path_traversal.txt": 833,
-    "sqli.txt": 656,
+    "cmdi.txt": 578,
+    "crlf.txt": 46,
+    "deserialization.txt": 26,
+    "file_upload.txt": 47,
+    "idor.txt": 46,
+    "ldapi.txt": 63,
+    "nosqli.txt": 74,
+    "open_redirect.txt": 317,
+    "path_traversal.txt": 857,
+    "sqli.txt": 703,
     "sqli_time.txt": 139,
-    "ssrf.txt": 74,
-    "ssti.txt": 134,
-    "xpath.txt": 39,
-    "xss.txt": 160,
-    "xxe.txt": 85,
+    "ssrf.txt": 97,
+    "ssti.txt": 167,
+    "xpath.txt": 52,
+    "xss.txt": 195,
+    "xxe.txt": 103,
+}
+
+#: Общий объём payload-баз после WAF-bypass расширения (было 3298).
+MIN_TOTAL_PAYLOADS = 3601
+
+#: Ключевые наборы, в которые добавлена секция `# --- WAF bypass ---`.
+WAF_BYPASS_FILES = (
+    "sqli.txt", "xss.txt", "cmdi.txt", "path_traversal.txt", "ssrf.txt",
+    "xxe.txt", "open_redirect.txt", "crlf.txt", "ssti.txt",
+    "nosqli.txt", "ldapi.txt", "xpath.txt", "deserialization.txt",
+    "file_upload.txt", "idor.txt",
+)
+WAF_BYPASS_MARKER = "# --- WAF bypass ---"
+
+#: Репрезентативные обфускации: должны физически присутствовать в файле.
+WAF_REPRESENTATIVE_MARKERS = {
+    "sqli.txt": (
+        "/*!50000UNION*/", "UN/**/ION", "%55nion", "UnIoN SeLeCt",
+        "/*!50000or*/", "AND/**/1=1", "0x41=0x41", "CHAR(65)=CHAR(65)",
+        "1e1=10",
+    ),
+    "xss.txt": (
+        "<scr<script>ipt>", "<svg/onload=", "&#x3c;script", "\\u003cscript",
+        "java%09script", "srcdoc", "vbscript:", "xlink:href=\"javascript:",
+    ),
+    "cmdi.txt": (
+        "${IFS}", "$@", "%0a", "\\r\\n", "%3b", "`id", "c^m^d", "who^ami",
+        "base64 -d",
+    ),
+    "path_traversal.txt": (
+        "....//", "..%2f", "%252e%252e", "%c0%af", "..;/", "%5c", "..\\",
+    ),
+    "ssrf.txt": (
+        "0x7f", "2130706433", "017700000001", "[::ffff:127.0.0.1]",
+        "nip.io", "127.0.0.1@evil.com", "gopher://", "dict://", "file:///",
+    ),
+    "xxe.txt": (
+        "<!ENTITY %", "XInclude", "xi:include", "soap:Envelope",
+        "encoding=\"UTF-16\"",
+    ),
+    "open_redirect.txt": (
+        "https:/\\", "\\/\\/evil.com", "trusted.com@evil.com",
+        "evil.com@trusted.com", "%2F%2Fevil.com", "javascript:",
+    ),
+    "crlf.txt": (
+        "%0d%0a", "\\r\\n", "%0a", "%E5%98%8D", "%u000d%u000a",
+        "X-VulnScanner-CRLF-Test", "X-CRLF-Injected", "X-Injected",
+    ),
+    "ssti.txt": (
+        "{#notscan#}", "{%print(", "{{7*7|abs}}", "|attr('__mul__')",
+        "{{7|attr(", "os.popen('id')", "{{\\n7*7\\n}}", "%7B%7B7*7%7D%7D",
+        "#{7*7}",
+    ),
+    "nosqli.txt": (
+        "$expr", "$nor", "$elemMatch", "$options",
+        "function(){return this.a==this.a}",
+    ),
+    "ldapi.txt": (
+        "objectClass=*)", "\\2a", "%2a%29%28", "cn=*)",
+    ),
+    "xpath.txt": (
+        "' or //*[1] or '1'='1", "count(//*)", "name(/*)", "%27%20or%20",
+    ),
+    "deserialization.txt": (
+        "O:6:\"Marker\"", "notscan", "rO0AB", "AAEAAAD", "gAJ9cQ",
+        "$type",
+    ),
+    "file_upload.txt": (
+        "x.php.jpg", "x.jpg.php", "x.pHp5", "x.php%00.png",
+        "::$DATA", "x.user.ini",
+    ),
+    "idor.txt": (
+        "null", "undefined", "0x1f", "deadbeef", "MDAwMDAwMDAt",
+        "YWRtaW4=",
+    ),
 }
 
 # check_type → файл, как их подключает scanner_core.load_payloads (legacy filename_map).
@@ -272,6 +351,116 @@ class TestCatalogIntegration(unittest.TestCase):
             self.skipTest("load_payloads не знает ssi_injection/html_injection")
         self.assertEqual(len(ssi), len(parse_payload_file(PAYLOADS_DIR / "ssi.txt")))
         self.assertEqual(len(html), len(parse_payload_file(PAYLOADS_DIR / "html_injection.txt")))
+
+
+# ══════════════════════════════════════════════════════════════════
+#  WAF-bypass секции (task-16)
+# ══════════════════════════════════════════════════════════════════
+
+def waf_section_text(path: Path) -> str:
+    """Текст файла после маркера `# --- WAF bypass ---`."""
+    text = path.read_text(encoding="utf-8")
+    if WAF_BYPASS_MARKER not in text:
+        return ""
+    return text.split(WAF_BYPASS_MARKER, 1)[1]
+
+
+def waf_section_payloads(path: Path) -> list[str]:
+    """Payload'ы WAF-секции (комментарии/пустые строки игнорируются)."""
+    return [
+        ln.strip()
+        for ln in waf_section_text(path).splitlines()
+        if ln.strip() and not ln.startswith("#")
+    ]
+
+
+class TestWafBypassSections(unittest.TestCase):
+    def test_sections_present_in_key_files(self):
+        for fname in WAF_BYPASS_FILES:
+            path = PAYLOADS_DIR / fname
+            self.assertTrue(path.exists(), f"{fname}: файл пропал")
+            text = path.read_text(encoding="utf-8")
+            self.assertIn(
+                WAF_BYPASS_MARKER, text,
+                f"{fname}: нет секции '{WAF_BYPASS_MARKER}'",
+            )
+            # маркер должен быть один, не размазан по файлу
+            self.assertEqual(
+                text.count(WAF_BYPASS_MARKER), 1,
+                f"{fname}: маркер WAF-секции встречается более одного раза",
+            )
+
+    def test_section_has_payloads(self):
+        for fname in WAF_BYPASS_FILES:
+            payloads = waf_section_payloads(PAYLOADS_DIR / fname)
+            self.assertGreaterEqual(
+                len(payloads), 8,
+                f"{fname}: в WAF-секции только {len(payloads)} payload'ов",
+            )
+            self.assertEqual(
+                len(payloads), len(set(payloads)),
+                f"{fname}: дубликаты внутри WAF-секции",
+            )
+
+    def test_representative_obfuscations_present(self):
+        for fname, markers in WAF_REPRESENTATIVE_MARKERS.items():
+            text = (PAYLOADS_DIR / fname).read_text(encoding="utf-8")
+            payloads_joined = "\n".join(parse_payload_file(PAYLOADS_DIR / fname))
+            for marker in markers:
+                self.assertIn(
+                    marker, payloads_joined,
+                    f"{fname}: нет репрезентативного WAF-варианта {marker!r}",
+                )
+            self.assertIn(WAF_BYPASS_MARKER, text, f"{fname}: нет WAF-секции")
+
+    def test_waf_payloads_are_non_destructive(self):
+        """WAF-bypass пробы — только чтение/инъекция, без разрушающих операций."""
+        for fname in WAF_BYPASS_FILES:
+            for payload in waf_section_payloads(PAYLOADS_DIR / fname):
+                self.assertFalse(
+                    scanner_core._is_destructive_payload(payload),
+                    f"{fname}: деструктивный payload в WAF-секции: {payload!r}",
+                )
+
+    def test_total_payload_count_grew(self):
+        grand_total = sum(
+            len(parse_payload_file(path)) for path in payload_files()
+        )
+        self.assertGreaterEqual(
+            grand_total, MIN_TOTAL_PAYLOADS,
+            f"общий объём payload-баз уменьшился: {grand_total} < {MIN_TOTAL_PAYLOADS}",
+        )
+
+    def test_waf_sections_load_through_loader(self):
+        """WAF-строки реально попадают в load_payloads (файлы читаются чеками)."""
+        from checks.catalog import payload_file_for  # type: ignore
+
+        relevant_checks = [
+            "sqli", "xss_reflected", "cmdi", "path_traversal", "ssrf", "xxe",
+            "open_redirect", "crlf_injection", "ssti", "nosql_injection",
+            "ldap_injection", "xpath_injection", "deserialization",
+            "file_upload", "idor",
+        ]
+        for check_id in relevant_checks:
+            fname = payload_file_for(check_id)
+            self.assertIsNotNone(fname, f"{check_id}: payload-файл не найден в каталоге")
+            loaded = set(scanner_core.load_payloads(check_id, safe_mode=False))
+            self.assertTrue(loaded, f"{check_id}: load_payloads вернул пусто")
+
+            def _expected(payload: str) -> str:
+                # CRLF-набор нормализуется loader'ом перед использованием.
+                if check_id == "crlf_injection":
+                    return scanner_core._normalize_crlf_payload(payload)
+                return payload
+
+            missing = [
+                p for p in waf_section_payloads(PAYLOADS_DIR / fname)
+                if _expected(p) not in loaded
+            ]
+            self.assertEqual(
+                missing, [],
+                f"{check_id}: WAF-payload'ы не загружаются через load_payloads: {missing[:3]}",
+            )
 
 
 if __name__ == "__main__":

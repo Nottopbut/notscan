@@ -430,6 +430,9 @@ BLIND_LEN_REL_DIFF = 0.03
 BLIND_MIN_BASELINE_SIM = 0.90
 BLIND_BASELINE_SIM_MARGIN = 0.05
 BLIND_FLOATING_SIM_EPS = 0.02
+# Статусы «шлюзов» (WAF/auth/rate-limit). Их разница с обычным 200 — это, как
+# правило, блокировка или дрейф сессии, а не boolean-blind SQLi (FP-guard).
+BLIND_GATE_STATUSES = frozenset({401, 403, 406, 418, 429})
 
 
 def parse_blind_payload(pair_line: str) -> Optional[tuple[str, str]]:
@@ -538,11 +541,32 @@ def evaluate_blind_pair(
     differ = status_diff or len_diff or (sim_true_false < BLIND_SIM_DIFF)
     if not differ:
         return None
-    # Одинаковые 4xx/5xx (WAF/ошибка) — не blind-сигнал.
-    if true_status == false_status and true_status >= 400:
-        return None
 
     has_baseline = bool(base_text) or baseline_status is not None
+
+    # Оба ответа — ошибки (4xx/5xx): WAF/upstream/таймауты, не boolean-сигнал.
+    if true_status >= 400 and false_status >= 400:
+        return None
+    # Серверная ошибка (>=500) на стороне, не совпадающей с baseline, — это
+    # WAF/апстрим/сбой, а не булева разница. (При baseline такого поведения нет.)
+    if has_baseline and baseline_status is not None:
+        for _st in (true_status, false_status):
+            if _st >= 500 and _st != baseline_status:
+                return None
+
+    # WAF/auth/rate-limit gate: 200 vs 401/403/406/418/429 — обычно блокировка
+    # запроса (WAF) или истёкшая сессия, а не boolean-инъекция. Не флагуем, если
+    # «шлюзовый» статус есть на стороне, отличной от baseline (baseline сам
+    # может быть gate-статусом — тогда это ожидаемое поведение).
+    if status_diff:
+        gate_side = (
+            true_status if true_status in BLIND_GATE_STATUSES
+            else false_status if false_status in BLIND_GATE_STATUSES
+            else None
+        )
+        if gate_side is not None and gate_side != baseline_status:
+            return None
+
     baseline_note = ""
     if has_baseline:
         masked_base = _blind_echo_mask(base_text, payload_true)

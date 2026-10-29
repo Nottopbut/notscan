@@ -291,6 +291,21 @@ def fetch_history(limit: int = 500) -> list:
     return [dict(r) for r in rows]
 
 
+def fetch_history_refs(limit: int = 10000, offset: int = 0) -> list:
+    """Лёгкая страница history (только id+url), ORDER BY id DESC.
+
+    Для батч-обработки больших историй (например «Clear browser noise»):
+    не тянет BLOB-поля req_body/resp_body_preview, поэтому листать можно
+    без раздувания памяти. Полная выборка — с offset=0 до пустой страницы.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, url FROM history ORDER BY id DESC LIMIT ? OFFSET ?",
+            (int(limit), max(0, int(offset))),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def fetch_history_by_id(history_id: int) -> Optional[dict]:
     with get_conn() as conn:
         row = conn.execute(
@@ -775,12 +790,20 @@ def clear_scan_results() -> int:
 
 
 def delete_scan_result(result_id: int) -> None:
-    """Удаляет одну запись scan_results и все связанные данные по id."""
+    """Удаляет одну запись scan_results и все связанные данные по id.
+
+    Удаляет и scan_links, где результат — источник или цель связи, иначе в БД
+    остаются висячие ссылки на несуществующий scan_result (integrity-баг).
+    """
     with get_conn() as conn:
         conn.execute("DELETE FROM scan_requests WHERE scan_result_id=?", (result_id,))
         conn.execute("DELETE FROM scan_meta WHERE scan_result_id=?", (result_id,))
         conn.execute("DELETE FROM scan_confirmations WHERE scan_result_id=?", (result_id,))
         conn.execute("DELETE FROM scan_evidence_snippets WHERE scan_result_id=?", (result_id,))
+        conn.execute(
+            "DELETE FROM scan_links WHERE src_result_id=? OR dst_result_id=?",
+            (result_id, result_id),
+        )
         conn.execute("DELETE FROM scan_results WHERE id=?", (result_id,))
 
 

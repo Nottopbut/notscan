@@ -1,6 +1,6 @@
 # Insecure Deserialization payloads
 # Source: https://github.com/swisskyrepo/PayloadsAllTheThings
-# Total: 16 payloads
+# Total: 26 payloads
 rO0ABXNyABdqYXZhLnV0aWwuUHJpb3JpdHlRdWV1ZQ==
 rO0ABXNyABNqYXZhLnV0aWwuQXJyYXlMaXN0AAAAAAAAAAA=
 O:4:"User":1:{s:4:"name";s:5:"admin";}
@@ -19,3 +19,16 @@ gAJ9cQBYBwAAAG5vdHNjYW5xAVgGAAAAbWFya2VycQJzLg==
 BAhJIhVub3RzY2FuX21hcmtlcgY6BkVU
 {"__proto__":{"notscan":"polluted"}}
 !!python/object:notscan.Marker {notscan: ok}
+
+# --- WAF bypass ---
+# non-destructive marker gadgets (Round-3 WAF)
+O:6:"Marker":1:{s:7:"notscan";s:2:"ok";}
+a:2:{s:7:"notscan";s:2:"ok";s:8:"markerid";i:1;}
+O:7:"Notscan":2:{s:4:"test";s:2:"ok";s:7:"notscan";s:2:"ok";}
+O:8:"stdClass":1:{s:7:"notscan";s:4:"okay";}
+rO0ABXQAB25vdHNjYW4=
+rO0ABXNyAApub3RzY2FuLk1hcmtlcgA=
+AAEAAAD/////AQAAAAAAAAAMAgAAAARub3RzY2Fu
+gAJ9cQBYBwAAAG5vdHNjYW4=
+{"$type":"notscan.Marker","notscan":"ok"}
+<?xml version="1.0"?><Marker xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="notscan:Marker">ok</Marker>

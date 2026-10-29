@@ -1,7 +1,7 @@
 # IDOR — Insecure Direct Object Reference probes
 # Числовые и UUID идентификаторы объектов для подстановки в id-подобные параметры.
 # Безопасные значения: сканер подставляет их вместо исходного id.
-# Total: 28 payloads
+# Total: 46 payloads
 0
 1
 2
@@ -32,3 +32,25 @@
 0x10
 1e3
 22222222-2222-2222-2222-222222222222
+
+# --- WAF bypass ---
+# WAF/parser evasion identifiers
+null
+undefined
+0x1f
+0X41
+00000001
+300
+1337
+99999
+1000000
+-9999
+1.0
+deadbeef
+8f14e45f-ceea-467a-9f1a-0b6f8a0c1d2e
+# base64-encoded object identifiers (UUID/admin)
+MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAw
+MTExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTEx
+OGYxNGU0NWYtY2VlYS00NjdhLTlmMWEtMGI2ZjhhMGMxZDJl
+ZGVhZGJlZWYtZGVhZC1iZWVmLWRlYWQtYmVlZmRlYWRiZWVm
+YWRtaW4=

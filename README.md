@@ -61,7 +61,9 @@ and reports.
   (baseline / benign / suspicious replay), paginated results.
 - **Reports** — Markdown, JSON, HTML, SARIF, DOCX; the full result set is exported by
   default (no silent truncation).
-- **Payload sets** — ~3.3k payloads across 19 sets (SQLi incl. boolean-blind true/false
+- **Payload sets** — ~3.6k payloads across 19 sets with dedicated **WAF-bypass
+  variants** (case/comment obfuscation, encoding/HTML-entity/unicode tricks, IP
+  representations) in every injection set (SQLi incl. boolean-blind true/false
   pairs, XSS, SSTI, SSRF, XXE, NoSQLi,
   LDAP, XPath, CRLF, CMDi, path traversal, open redirect, file upload, IDOR,
   deserialization, SSI, HTML injection, time-based SQLi). Safe Mode filters destructive
@@ -100,6 +102,8 @@ python notscan.py
    press **＋ Add to Scan list**, then **▶ Run Scan**.
 4. In the scan-config window pick checks (active / passive / probe), mutation points and
    ROE options (concurrency, RPS, scope allowlist, Safe Mode, tamper), then **Start Scan**.
+   **All checks are disabled by default** (the window shows `0 / 39 checks enabled`): enable
+   the ones you need or press **All ON**; badges show ☐/☑ state.
 5. Review findings in **Scan Results** (severity, evidence, raw HTTP, diff, confirm flow)
    and export a report (MD / JSON / HTML / SARIF / DOCX).
 
@@ -124,7 +128,7 @@ make smoke    # headless GUI smoke test in xvfb on a temp copy of the project
 The repository ships a self-contained HTTP lab (`tests/lab/`) with intentionally vulnerable
 endpoints (reflected XSS, escaped reflection, SQL errors, redirects, delayed responses,
 CSRF-protected form, JSON API, cookie/CORS/SSRF/SSI cases, sensitive files/metafiles) used
-by 369 unit and integration tests. Proxy-lifecycle integration tests are skipped
+by 398 unit and integration tests. Proxy-lifecycle integration tests are skipped
 automatically when mitmproxy or a display is unavailable.
 
 ## Project structure

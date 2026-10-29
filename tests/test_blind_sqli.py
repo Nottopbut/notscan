@@ -500,3 +500,83 @@ def test_load_payloads_uses_catalog_file():
     payloads = scanner_core.load_payloads("sqli_blind", safe_mode=True)
     assert payloads, "catalog.payload_file_for('sqli_blind') должен вести на файл"
     assert all("|||" in line for line in payloads)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  FP-guard: статусы "шлюзов" (WAF/auth/rate-limit) — не boolean-blind
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_gate_status_not_blind_with_baseline():
+    """200 vs 403/401/429 при нормальном baseline — это WAF/сессия, не blind."""
+    for gated in (401, 403, 406, 418, 429):
+        assert gated in scanner_core.BLIND_GATE_STATUSES
+        # gated = false-ответ
+        res = scanner_core.evaluate_blind_pair(
+            true_status=200, true_text="<html>admin panel size 1000</html>",
+            false_status=gated, false_text="<html>blocked</html>",
+            payload_true="' AND 1=1-- -", payload_false="' AND 1=2-- -",
+            baseline_text="<html>admin panel size 1000</html>", baseline_status=200,
+        )
+        assert res is None, f"200 vs {gated}: ожидался FP-guard"
+        # gated = true-ответ
+        res = scanner_core.evaluate_blind_pair(
+            true_status=gated, true_text="<html>blocked</html>",
+            false_status=200, false_text="<html>admin panel size 1000</html>",
+            payload_true="' AND 1=1-- -", payload_false="' AND 1=2-- -",
+            baseline_text="<html>admin panel size 1000</html>", baseline_status=200,
+        )
+        assert res is None, f"{gated} vs 200: ожидался FP-guard"
+
+
+def test_gate_status_without_baseline_not_blind():
+    """Без baseline 200 vs 403 тоже не должен давать blind-находку."""
+    for gated in (401, 403, 429):
+        res = scanner_core.evaluate_blind_pair(
+            true_status=200, true_text="ok page",
+            false_status=gated, false_text="blocked",
+            payload_true="' AND 1=1-- -", payload_false="' AND 1=2-- -",
+        )
+        assert res is None
+
+
+def test_gate_status_matching_baseline_still_detected():
+    """Если сам baseline — gated-статус (например 403), статус-паттерн валиден."""
+    res = scanner_core.evaluate_blind_pair(
+        true_status=403, true_text="<html>blocked page</html>",
+        false_status=200, false_text="<html>admin panel size 1000</html>",
+        payload_true="' AND 1=1-- -", payload_false="' AND 1=2-- -",
+        baseline_text="<html>blocked page</html>", baseline_status=403,
+    )
+    assert res is not None
+
+
+def test_error_error_pairs_not_blind_without_baseline():
+    """500 vs 502 без baseline — WAF/upstream, не boolean-blind SQLi (FP-guard)."""
+    res = scanner_core.evaluate_blind_pair(
+        true_status=500, true_text="Internal Server Error",
+        false_status=502, false_text="Bad Gateway",
+        payload_true="' AND 1=1-- -", payload_false="' AND 1=2-- -",
+    )
+    assert res is None
+
+
+def test_one_success_side_still_detected_without_baseline():
+    """200 vs 500 без baseline: одна сторона 2xx — статус-дифф допустим."""
+    res = scanner_core.evaluate_blind_pair(
+        true_status=200, true_text="<html>admin panel size 1000</html>",
+        false_status=500, false_text="<html>oops</html>",
+        payload_true="' AND 1=1-- -", payload_false="' AND 1=2-- -",
+    )
+    assert res is not None
+
+
+def test_server_error_side_vs_baseline_not_blind():
+    """baseline 200 + false 502 — серверная ошибка на одной стороне, не blind."""
+    res = scanner_core.evaluate_blind_pair(
+        true_status=200, true_text="<html>admin panel size 1000</html>",
+        false_status=502, false_text="<html>bad gateway</html>",
+        payload_true="' AND 1=1-- -", payload_false="' AND 1=2-- -",
+        baseline_text="<html>admin panel size 1000</html>", baseline_status=200,
+    )
+    assert res is None

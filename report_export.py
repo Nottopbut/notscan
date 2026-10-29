@@ -21,20 +21,37 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _catalog_severity_map() -> dict:
+    """check_id → severity из единого каталога чеков (если доступен)."""
+    try:
+        from checks.catalog import CHECK_CATALOG  # локальный импорт: каталог лёгкий
+        return {d.check_id.lower(): str(d.severity).upper() for d in CHECK_CATALOG}
+    except Exception:
+        return {}
+
+
+_CATALOG_SEVERITY = _catalog_severity_map()
+
+
 def _row_severity(r: dict) -> str:
     """Severity из scan_meta (CRITICAL/HIGH/MEDIUM/LOW/INFO) с фолбэком по check_type."""
     sev = (r.get("severity") or "").strip().upper()
     if sev:
         return sev
     ct = (r.get("check_type") or "").lower()
+    if ct in _CATALOG_SEVERITY:
+        return _CATALOG_SEVERITY[ct]
     if ct in ("cmdi", "ssti", "deserialization", "file_upload",
-              "sqli", "sqli_time", "xxe", "ssrf", "path_traversal"):
+              "sqli", "sqli_time", "sqli_blind", "ssi_injection", "xxe", "ssrf",
+              "path_traversal"):
         return "HIGH"
     if ct in ("xss", "xss_reflected", "xss_dom", "open_redirect", "crlf_injection",
-              "nosql_injection", "ldap_injection", "xpath_injection", "idor"):
+              "html_injection", "nosql_injection", "ldap_injection",
+              "xpath_injection", "idor", "cors", "ria_policy", "http_methods"):
         return "MEDIUM"
     if ct in ("csrf", "clickjacking", "security_headers",
-              "info_disclosure", "outdated_libs", "third_party_scripts"):
+              "info_disclosure", "outdated_libs", "third_party_scripts", "metafiles",
+              "cookies", "hsts", "csp", "cache_control"):
         return "LOW"
     return "INFO"
 
@@ -70,6 +87,20 @@ RECOMMENDATIONS = {
     "idor": "Проверка прав на уровне объекта (object-level authorization). Не доверяй ID из URL.",
     "jwt": "Валидируй подпись JWT на сервере. Отклоняй alg=none. Используй длинный случайный HMAC-секрет или RS256.",
     "info_disclosure_paths": "Закрой доступ к чувствительным путям (actuator, .env, .git, swagger, metrics и т.п.) или ограничь их авторизацией.",
+    "sqli_blind": "Параметризованные запросы (prepared statements). Не конкатенируй пользовательский ввод в SQL; следи за одинаковым поведением ответа на булевы условия.",
+    "ssi_injection": "Не обрабатывай пользовательский ввод SSI-движком; экранируй директивы или отключи SSI для пользовательских данных.",
+    "html_injection": "Контекстное HTML-экранирование вывода. Не вставляй пользовательский ввод в HTML без кодирования.",
+    "cookies": "Установи Secure, HttpOnly и SameSite=Lax/Strict для сессионных cookie; не храни секреты в cookie.",
+    "hsts": "Добавь Strict-Transport-Security (max-age >= 31536000, includeSubDomains) для HTTPS-ответов.",
+    "csp": "Настрой Content-Security-Policy без unsafe-inline/unsafe-eval; используй nonce/hash и строгий script-src.",
+    "cache_control": "Для ответов с сессией/секретами используй Cache-Control: no-store, private и Pragma: no-cache.",
+    "insecure_login": "Передавай креды только по HTTPS; не используй формы логина и Authorization на HTTP.",
+    "browser_storage": "Не храни токены/секреты в localStorage/sessionStorage; используй HttpOnly-cookie с защитой от XSS.",
+    "metafiles": "Проверь robots.txt/sitemap.xml/security.txt на утечку внутренних путей и удали лишние записи.",
+    "ria_policy": "Убери wildcard из crossdomain.xml/clientaccesspolicy.xml; ограничь домены явным allowlist.",
+    "http_methods": "Отключи ненужные HTTP-методы (TRACE/PUT/DELETE), оставь только необходимые; ограничь через прокси/сервер.",
+    "sensitive_files": "Закрой доступ к бэкапам, .env/.git и служебным файлам; храни их вне webroot.",
+    "cors": "Не отражай произвольный Origin и не используй Access-Control-Allow-Credentials вместе с wildcard; веди allowlist origin.",
     "csrf": "CSRF-токены + SameSite cookies. Проверяй Origin/Referer.",
     "clickjacking": "Заголовки X-Frame-Options / CSP frame-ancestors.",
     "security_headers": "Добавь недостающие security-заголовки (HSTS, X-Content-Type-Options, CSP и др.).",

