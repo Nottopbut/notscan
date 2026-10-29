@@ -1673,6 +1673,9 @@ class ScanConfigWindow(tk.Toplevel):
             ("Body form", p._mut_form),
             ("Body JSON", p._mut_json),
             ("Headers", p._mut_headers),
+            ("Cookies", p._mut_cookies),
+            ("Path segments", p._mut_path),
+            ("Multipart form-data", p._mut_multipart),
         ]:
             ttk.Checkbutton(mut_lf, text=text, variable=var).pack(
                 side=tk.LEFT, padx=6, pady=4)
@@ -2115,6 +2118,8 @@ class App(tk.Tk):
 
         # State
         self._scan_list: dict[int, dict] = {}   # history_id → record
+        # Postman environment для {{var}} при импорте коллекций (только сессия).
+        self._postman_env: dict[str, str] = {}
         self._proxy_runner: Optional[ProxyRunner] = None
         # Авто-жизненный цикл прокси
         self._browser_proc: Optional[subprocess.Popen] = None
@@ -2152,6 +2157,10 @@ class App(tk.Tk):
         self._mut_form = tk.BooleanVar(value=True)
         self._mut_json = tk.BooleanVar(value=True)
         self._mut_headers = tk.BooleanVar(value=False)
+        # Multi-boundary mutations (Cookies / Path segments / Multipart form-data).
+        self._mut_cookies = tk.BooleanVar(value=True)
+        self._mut_path = tk.BooleanVar(value=True)
+        self._mut_multipart = tk.BooleanVar(value=True)
         self._safe_mode_var = tk.BooleanVar(value=True)
         self._planner_var = tk.BooleanVar(value=True)
         # Tamper/WAF-bypass: payload-кодирование (TAMPER_MODES из templating).
@@ -2576,6 +2585,10 @@ class App(tk.Tk):
         self._history_filter.bind("<KeyRelease>", lambda e: self._refresh_history())
         ttk.Button(hist_search, text="✕ Clear", command=self._clear_history_filter).pack(side=tk.LEFT, padx=2)
         ttk.Button(hist_search, text="⬆ Import", command=self._import_collection).pack(side=tk.LEFT, padx=(8, 2))
+        ttk.Button(
+            hist_search, text="⬆ Import environment",
+            command=self._import_environment,
+        ).pack(side=tk.LEFT, padx=2)
         ttk.Button(hist_search, text="⬇ Export", command=self._export_collection).pack(side=tk.LEFT, padx=2)
 
         self._history_tree = self._make_tree(
@@ -4336,10 +4349,206 @@ class App(tk.Tk):
             pass
         self._refresh_history()
 
+    # ── Postman environment helpers (сессионное окружение для {{var}}) ──
+
+    @staticmethod
+    def _fmt_var_list(names: list[str], limit: int = 8) -> str:
+        """Список переменных для диалога: {{a}}, {{b}}… (не длиннее limit)."""
+        shown = [f"{{{{{name}}}}}" for name in names[:limit]]
+        text = ", ".join(shown)
+        if len(names) > limit:
+            text += " …"
+        return text
+
+    def _local_postman_missing(self, path) -> list[str]:
+        """Fallback-детектор {{variable}} для Postman-коллекции без env-API."""
+        try:
+            import json as _json
+            import re as _re
+            raw = Path(path).read_text(encoding="utf-8", errors="replace")
+            data = _json.loads(raw)
+        except Exception:
+            return []
+        if not isinstance(data, dict) or not (
+            "info" in data or "item" in data
+        ):
+            return []  # не Postman-коллекция (HAR/raw HTTP и пр.)
+        collection_keys: set[str] = set()
+        for item in data.get("variable") or []:
+            if isinstance(item, dict) and item.get("key"):
+                collection_keys.add(str(item["key"]))
+        found = set()
+        for match in _re.finditer(r"\{\{\s*([^{}]+?)\s*\}\}", raw):
+            found.add(match.group(1))
+        known = set((getattr(self, "_postman_env", {}) or {}).keys())
+        return sorted(v for v in found if v and v not in known and v not in collection_keys)
+
+    def _postman_missing_vars(self, path) -> list[str]:
+        """Недостающие переменные Postman-окружения (API collection_io или fallback)."""
+        try:
+            import collection_io
+            fn = getattr(collection_io, "postman_missing_variables", None)
+            if callable(fn):
+                env = getattr(self, "_postman_env", {}) or None
+                try:
+                    missing = fn(path, environment=env)
+                except TypeError:
+                    missing = fn(path)
+                return [str(name) for name in (missing or [])]
+        except Exception:
+            pass
+        return self._local_postman_missing(path)
+
+    def _parse_postman_env_file(self, path) -> dict:
+        """Значения Postman environment: API collection_io или локальный парсер."""
+        try:
+            import collection_io
+            fn = getattr(collection_io, "postman_environment", None)
+            if callable(fn):
+                env = fn(path)
+                if isinstance(env, dict):
+                    return {
+                        str(key): str(value)
+                        for key, value in env.items() if value is not None
+                    }
+        except Exception:
+            pass
+        # Fallback: Postman env JSON {"values": [{"key","value","enabled"}]}
+        # либо плоский {"key": "value"}.
+        try:
+            import json as _json
+            data = _json.loads(
+                Path(path).read_text(encoding="utf-8", errors="replace")
+            )
+        except Exception:
+            return {}
+        out: dict[str, str] = {}
+        if not isinstance(data, dict):
+            return out
+        values = data.get("values")
+        if isinstance(values, list):
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                key = item.get("key")
+                if key is None or item.get("value") is None:
+                    continue
+                if item.get("enabled", True) is False:
+                    continue
+                out[str(key)] = str(item["value"])
+        if not out:
+            for key, value in data.items():
+                if isinstance(value, (str, int, float, bool)):
+                    out[str(key)] = str(value)
+        return out
+
+    def _import_environment(self) -> None:
+        """⬆ Import environment: загрузить Postman environment в сессию."""
+        env_path = filedialog.askopenfilename(
+            title=i18n.tr("Import environment"),
+            filetypes=[
+                ("Postman environment", "*.json"),
+                ("JSON", "*.json"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not env_path:
+            return
+        env = self._parse_postman_env_file(env_path)
+        if not env:
+            mb.showwarning(
+                i18n.tr("Import environment"),
+                i18n.tr("No variables found in the environment file."),
+            )
+            return
+        self._postman_env.update(env)
+        self.log(
+            f"[IMPORT] Environment loaded: {len(env)} vars "
+            f"from {Path(env_path).name}"
+        )
+        mb.showinfo(
+            i18n.tr("Import environment"),
+            i18n.tr("Environment loaded: {count} variables", count=len(env)),
+        )
+
+    def _resolve_postman_variables(self, path):
+        """Спросить/загрузить Postman env, если коллекция использует {{var}}.
+
+        Returns:
+            dict | None — переменные для импорта;
+            "abort" — пользователь отказался импортировать.
+        """
+        missing = self._postman_missing_vars(path)
+        if not missing:
+            return dict(getattr(self, "_postman_env", {}) or {}) or None
+
+        vars_text = self._fmt_var_list(missing)
+        load_env = mb.askyesno(
+            i18n.tr("Import"),
+            i18n.tr(
+                "The collection uses Postman environment variables: {vars}.\n"
+                "Load an environment file (.json)?",
+                vars=vars_text,
+            ),
+        )
+        if load_env:
+            env_path = filedialog.askopenfilename(
+                title=i18n.tr("Import environment"),
+                filetypes=[
+                    ("Postman environment", "*.json"),
+                    ("JSON", "*.json"),
+                    ("All files", "*.*"),
+                ],
+            )
+            if env_path:
+                env = self._parse_postman_env_file(env_path)
+                if env:
+                    self._postman_env.update(env)
+                    self.log(
+                        f"[IMPORT] Environment loaded: {len(env)} vars "
+                        f"from {Path(env_path).name}"
+                    )
+                remaining = self._postman_missing_vars(path)
+                if remaining:
+                    mb.showwarning(
+                        i18n.tr("Import"),
+                        i18n.tr(
+                            "Some variables are still missing: {vars}",
+                            vars=self._fmt_var_list(remaining),
+                        ),
+                    )
+                    if not mb.askyesno(
+                        i18n.tr("Import"),
+                        i18n.tr(
+                            "Import anyway (unresolved variables will stay as "
+                            "{{...}})?"
+                        ),
+                    ):
+                        return "abort"
+            else:
+                # Диалог выбора env отменён — как отказ от окружения.
+                if not mb.askyesno(
+                    i18n.tr("Import"),
+                    i18n.tr(
+                        "Import without environment (variables will stay as "
+                        "{{...}})?"
+                    ),
+                ):
+                    return "abort"
+        else:
+            if not mb.askyesno(
+                i18n.tr("Import"),
+                i18n.tr(
+                    "Import without environment (variables will stay as {{...}})?"
+                ),
+            ):
+                return "abort"
+        return dict(getattr(self, "_postman_env", {}) or {}) or None
+
     def _import_collection(self) -> None:
         """Импорт коллекции (raw HTTP / HAR / Postman) в History."""
         path = filedialog.askopenfilename(
-            title="Import collection",
+            title=i18n.tr("Import collection"),
             filetypes=[
                 ("HTTP collections", "*.http *.txt *.har *.json"),
                 ("Raw HTTP", "*.http *.txt"),
@@ -4350,15 +4559,35 @@ class App(tk.Tk):
         )
         if not path:
             return
+        # Postman {{variables}}: при необходимости предлагаем env-файл.
+        variables = self._resolve_postman_variables(path)
+        if variables == "abort":
+            self.log("[IMPORT] Cancelled by user (no Postman environment)")
+            return
         try:
             import collection_io
-            records = collection_io.import_collection(path)
+            importer = collection_io.import_collection
+            try:
+                import inspect as _inspect
+                supports_vars = "variables" in _inspect.signature(importer).parameters
+            except (TypeError, ValueError):
+                supports_vars = False
+            if supports_vars:
+                records = importer(path, variables=variables)
+            else:
+                records = importer(path)
         except Exception as e:
             self.log(f"[IMPORT][ERR] {e}")
-            mb.showerror("Import", f"Failed to import: {e}")
+            mb.showerror(
+                i18n.tr("Import"),
+                i18n.tr("Failed to import: {error}", error=e),
+            )
             return
         if not records:
-            mb.showwarning("Import", "No requests found in the file")
+            mb.showwarning(
+                i18n.tr("Import"),
+                i18n.tr("No requests found in the file"),
+            )
             return
         imported = 0
         for rec in records:
@@ -4376,8 +4605,25 @@ class App(tk.Tk):
             except Exception as e:
                 self.log(f"[IMPORT][ERR] {rec.get('url', '?')}: {e}")
         self._refresh_history()
-        self.log(f"[IMPORT] Imported {imported} request(s) from {Path(path).name}")
-        mb.showinfo("Import", f"Imported {imported} request(s)")
+        env_count = len(variables) if variables else 0
+        self.log(
+            f"[IMPORT] Imported {imported} request(s) from {Path(path).name}"
+            + (f" (env vars: {env_count})" if env_count else "")
+        )
+        if env_count:
+            mb.showinfo(
+                i18n.tr("Import"),
+                i18n.tr(
+                    "Imported {count} request(s) using {vars} environment "
+                    "variable(s)",
+                    count=imported, vars=env_count,
+                ),
+            )
+        else:
+            mb.showinfo(
+                i18n.tr("Import"),
+                i18n.tr("Imported {count} request(s)", count=imported),
+            )
 
     def _export_collection(self) -> None:
         """Экспорт выбранных запросов History в коллекцию (Postman или raw HTTP)."""
@@ -4664,6 +4910,15 @@ class App(tk.Tk):
                     _build_kwargs["only_params"] = _only_params
                     if _only_params:
                         self.log(f"[SCAN] Only parameters: {_only_params}")
+                # Multi-boundary mutations: прокидываем, только если движок умеет.
+                for _kw, _var_name in (
+                    ("do_cookies", "_mut_cookies"),
+                    ("do_path", "_mut_path"),
+                    ("do_body_multipart", "_mut_multipart"),
+                ):
+                    if _kw in _build_params:
+                        _var = getattr(self, _var_name, None)
+                        _build_kwargs[_kw] = bool(_var.get()) if _var is not None else True
                 tasks = scanner_core.build_scan_tasks(**_build_kwargs)
             except Exception as _exc:
                 import traceback as _tb

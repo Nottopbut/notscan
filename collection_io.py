@@ -209,9 +209,176 @@ def parse_har(path) -> list[dict]:
     return records
 
 
-def parse_postman(path) -> list[dict]:
+_VAR_RE = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
+
+
+def _extract_vars(text: str) -> set[str]:
+    return {m.group(1).strip() for m in _VAR_RE.finditer(text or "") if m.group(1).strip()}
+
+
+def _resolve_text(text: str, variables: dict, depth: int = 5) -> str:
+    """Подставляет {{var}} из variables (повторно до depth, если значения ссылаются друг на друга)."""
+    if not text or not variables:
+        return text
+    out = str(text)
+    for _ in range(max(1, depth)):
+        def _sub(m: re.Match) -> str:
+            name = m.group(1).strip()
+            if name in variables and variables[name] is not None:
+                return str(variables[name])
+            return m.group(0)
+        new = _VAR_RE.sub(_sub, out)
+        if new == out:
+            break
+        out = new
+    return out
+
+
+def _resolve_record(rec: dict, variables: dict) -> dict:
+    """Возвращает копию записи с подставленными {{var}} в url/headers/body."""
+    if not variables:
+        return rec
+    headers = {k: _resolve_text(v, variables) for k, v in (rec.get("headers") or {}).items()}
+    body = rec.get("body") or b""
+    if isinstance(body, bytes):
+        try:
+            body = _resolve_text(body.decode("utf-8", errors="replace"), variables).encode("utf-8")
+        except Exception:
+            pass
+    return {
+        "method": rec.get("method") or "GET",
+        "url": _resolve_text(rec.get("url") or "", variables),
+        "headers": headers,
+        "body": body,
+    }
+
+
+def _postman_variable_list(data: dict) -> list:
+    """Переменные коллекции Postman (data['variable']) в едином виде."""
+    out = []
+    for item in (data.get("variable") or []):
+        if isinstance(item, dict):
+            key = item.get("key") or item.get("id")
+            if key:
+                out.append({"key": str(key), "value": item.get("value"),
+                            "enabled": not bool(item.get("disabled"))})
+    return out
+
+
+def postman_collection_variables(path) -> dict:
+    """Переменные, объявленные внутри Postman-коллекции (data.variable)."""
+    data = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
+    if not isinstance(data, dict) or "item" not in data:
+        return {}
+    out: dict[str, str] = {}
+    for v in _postman_variable_list(data):
+        if v.get("enabled") and v.get("value") is not None:
+            out[str(v["key"])] = str(v["value"])
+    return out
+
+
+def postman_environment(path) -> dict:
+    """Читает Postman environment/globals JSON и возвращает {key: value}.
+
+    Поддерживает:
+      • Postman environment/globals: {"values": [{"key","value","enabled"}]};
+      • плоский dict {"baseUrl": "http://..."};
+      • {"environment": {...}}.
+    Отключённые (enabled=false/disabled=true) переменные пропускаются.
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
+    if not isinstance(data, dict):
+        raise ValueError("Not a Postman environment file")
+    values = data.get("values")
+    if values is None and isinstance(data.get("environment"), dict):
+        values = data["environment"]
+    out: dict[str, str] = {}
+    if isinstance(values, list):
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            key = item.get("key") or item.get("id")
+            if not key:
+                continue
+            if item.get("enabled") is False or item.get("disabled") is True:
+                continue
+            value = item.get("value")
+            if value is not None:
+                out[str(key)] = str(value)
+    elif isinstance(values, dict):
+        for key, value in values.items():
+            if value is not None:
+                out[str(key)] = str(value)
+    elif "values" not in data:
+        # плоский словарь переменных
+        for key, value in data.items():
+            if isinstance(value, (str, int, float, bool)):
+                out[str(key)] = str(value)
+    return out
+
+
+def _all_postman_strings(data: dict) -> list[str]:
+    """Все строки коллекции, где могут встречаться {{переменные}}."""
+    found: list[str] = []
+
+    def _walk(item) -> None:
+        if isinstance(item, str):
+            found.append(item)
+        elif isinstance(item, dict):
+            for k, v in item.items():
+                if k in ("response", "auth", "script", "event"):
+                    continue
+                _walk(v)
+        elif isinstance(item, list):
+            for v in item:
+                _walk(v)
+
+    _walk(data.get("item") or [])
+    return found
+
+
+def postman_missing_variables(path, environment=None) -> list[str]:
+    """Неразрешённые переменные {{...}} коллекции с учётом collection-vars/окружения.
+
+    environment: dict | path к Postman environment JSON | None.
+    Возвращает отсортированный список имён; [] — окружение не требуется.
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
+    if not isinstance(data, dict) or "item" not in data:
+        return []
+    env_vars: dict[str, str] = {}
+    if environment:
+        try:
+            env_vars = (
+                dict(environment) if isinstance(environment, dict)
+                else postman_environment(environment)
+            )
+        except Exception:
+            env_vars = {}
+    known: dict[str, str] = {}
+    for v in _postman_variable_list(data):
+        if v.get("enabled") and v.get("value") is not None:
+            known[str(v["key"])] = str(v["value"])
+    known.update({str(k): str(v) for k, v in env_vars.items() if v is not None})
+    missing: set[str] = set()
+    for text in _all_postman_strings(data):
+        for name in _extract_vars(text):
+            # переменная, объявленная в env/collection (возможно пустая) — не missing
+            if name not in known:
+                missing.add(name)
+    return sorted(missing)
+
+
+def parse_postman(path, variables: Optional[dict] = None) -> list[dict]:
     data = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
     records: list[dict] = []
+    collection_vars: dict[str, str] = {}
+    for v in _postman_variable_list(data):
+        if v.get("enabled") and v.get("value") is not None:
+            collection_vars[str(v["key"])] = str(v["value"])
+    resolve_vars: dict[str, str] = dict(collection_vars)
+    if variables:
+        resolve_vars.update({str(k): str(v) for k, v in variables.items() if v is not None})
 
     def _postman_request(req: dict) -> dict:
         method = (req.get("method") or "GET").upper()
@@ -251,15 +418,18 @@ def parse_postman(path) -> list[dict]:
             if req:
                 rec = _postman_request(req)
                 if rec["url"]:
-                    records.append(rec)
+                    records.append(_resolve_record(rec, resolve_vars))
             _walk(it.get("item") or [])
 
     _walk(data.get("item") or [])
     return records
 
 
-def import_collection(path) -> list[dict]:
-    """Автоопределение формата по расширению/содержимому."""
+def import_collection(path, variables: Optional[dict] = None) -> list[dict]:
+    """Автоопределение формата по расширению/содержимому.
+
+    variables: значения Postman-окружения для подстановки {{var}} (только Postman).
+    """
     p = Path(path)
     ext = p.suffix.lower()
     text = p.read_text(encoding="utf-8", errors="replace")
@@ -272,7 +442,7 @@ def import_collection(path) -> list[dict]:
         except Exception:
             return []
         if isinstance(data, dict) and "item" in data:
-            return parse_postman(p)
+            return parse_postman(p, variables=variables)
         if isinstance(data, dict) and "log" in data:
             return parse_har(p)
         return []

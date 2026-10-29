@@ -700,6 +700,34 @@ _RAW_MESSAGES: tuple[tuple[str, str], ...] = (
     ("True", "Да"),
     ("False", "Нет"),
     ("No findings", "Находок нет"),
+    # ─────────────────────────── Import / Postman environment / mutations ───────────────────────────
+    ("Import collection", "Импорт коллекции"),
+    ("Import environment", "Импорт окружения"),
+    (
+        "The collection uses Postman environment variables: {vars}.\n"
+        "Load an environment file (.json)?",
+        "Коллекция использует переменные Postman-окружения: {vars}.\n"
+        "Загрузить файл окружения (.json)?",
+    ),
+    (
+        "Import without environment (variables will stay as {{...}})?",
+        "Импортировать без окружения (переменные останутся как {{...}})?",
+    ),
+    ("Some variables are still missing: {vars}", "Некоторые переменные всё ещё отсутствуют: {vars}"),
+    (
+        "Import anyway (unresolved variables will stay as {{...}})?",
+        "Импортировать всё равно (неразрешённые переменные останутся как {{...}})?",
+    ),
+    ("Environment loaded: {count} variables", "Окружение загружено: переменных — {count}"),
+    ("No variables found in the environment file.", "В файле окружения не найдено переменных."),
+    ("Imported {count} request(s)", "Импортировано запросов: {count}"),
+    (
+        "Imported {count} request(s) using {vars} environment variable(s)",
+        "Импортировано запросов: {count} (переменных окружения: {vars})",
+    ),
+    ("Failed to import: {error}", "Не удалось импортировать: {error}"),
+    ("Path segments", "Path-сегменты"),
+    ("Multipart form-data", "Multipart-форма"),
 )
 
 import re as _re

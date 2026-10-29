@@ -214,7 +214,8 @@ def test_async_runner_persists_all_tasks(stub_server, tmp_db, monkeypatch):
         "GET", f"{stub_server.base_url}/ok?id=1", resp_status=200, resp_body_preview=b"ok"
     )
     tasks = scanner_core.build_scan_tasks([hid], ["cmdi"])
-    assert len(tasks) == 5, f"ожидали 5 задач, получили {len(tasks)}"
+    # query (id) + path (ok) = 2 мутации × 5 payload'ов
+    assert len(tasks) == 10, f"ожидали 10 задач, получили {len(tasks)}"
 
     runner = _run_runner(tasks, workers=4)
 
@@ -222,7 +223,9 @@ def test_async_runner_persists_all_tasks(stub_server, tmp_db, monkeypatch):
     assert len(rows) == len(tasks), "не все задачи сохранены в scan_results"
     assert runner.tasks_remaining == 0
     assert all(r["status_code"] == 200 for r in rows)
-    assert stub_server.counts.get("/ok", 0) >= len(tasks)
+    # /ok получают только query-задачи (5); path-задачи идут на /<payload>
+    assert stub_server.counts.get("/ok", 0) >= len(tasks) // 2
+    assert sum(stub_server.counts.values()) >= len(tasks)
     # wait() вызвал stop(), поток-раннер должен быть уже мёртв
     assert not runner._threads
 
@@ -240,8 +243,8 @@ def test_async_runner_stop_does_not_hang(stub_server, tmp_db, monkeypatch):
         resp_body_preview=b"slow",
     )
     tasks = scanner_core.build_scan_tasks([hid], ["cmdi"])
-    # 2 query-параметра (ms, id) × 10 payload'ов
-    assert len(tasks) == 20
+    # 2 query-параметра (ms, id) + path-сегмент (slow) = 3 мутации × 10 payload'ов
+    assert len(tasks) == 30
 
     runner = scanner_core.ScannerRunner(
         tasks, workers=4, log_callback=lambda _m: None, scope_allowlist=["127.0.0.1"]
@@ -267,7 +270,7 @@ def test_async_runner_scope_guard_skips_private(stub_server, tmp_db, monkeypatch
     )
     hid = _insert_history("GET", f"{stub_server.base_url}/ok?id=1")
     tasks = scanner_core.build_scan_tasks([hid], ["cmdi"])
-    assert len(tasks) == 1
+    assert len(tasks) == 2  # query + path
 
     runner = scanner_core.ScannerRunner(
         tasks, workers=2, log_callback=lambda _m: None, scope_block_private=True
@@ -295,7 +298,7 @@ def test_redirects_are_not_followed(stub_server, tmp_db, monkeypatch):
         resp_status=302,
         resp_headers={"Location": "/followed-by-redirect"},
     )
-    tasks = scanner_core.build_scan_tasks([hid], ["cmdi"])
+    tasks = scanner_core.build_scan_tasks([hid], ["cmdi"], do_path=False)
     assert tasks, "нет задач на /redirect"
 
     _run_runner(tasks)
@@ -330,8 +333,9 @@ def test_build_scan_tasks_tamper_modes(stub_server, tmp_db, monkeypatch):
     base_tasks = scanner_core.build_scan_tasks([hid], ["sqli"])
     tampered_tasks = scanner_core.build_scan_tasks([hid], ["sqli"], tamper_modes=["url"])
 
-    assert len(base_tasks) == 1
-    assert len(tampered_tasks) == 2, "ожидали base + один tamper-вариант"
+    # query + path = 2 базовые задачи; tamper удваивает каждую
+    assert len(base_tasks) == 2
+    assert len(tampered_tasks) == 4, "ожидали 2 base + 2 tamper-варианта"
 
     encoded = templating.encode_payload(payload, "url")
     by_payload = {t.payload: t for t in tampered_tasks}
@@ -353,7 +357,8 @@ def test_build_scan_tasks_tamper_not_applied_to_xss(stub_server, tmp_db, monkeyp
     )
     hid = _insert_history("GET", f"{stub_server.base_url}/reflect?q=1")
     tasks = scanner_core.build_scan_tasks([hid], ["xss"], tamper_modes=["url"])
-    assert len(tasks) == 1, "для XSS tamper применяться не должен"
+    # query (q) + path (reflect) = 2 задачи, обе без tamper-вариантов
+    assert len(tasks) == 2, "для XSS tamper применяться не должен"
     assert tasks[0].payload == payload
 
 

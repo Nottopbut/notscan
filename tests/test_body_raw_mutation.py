@@ -140,7 +140,7 @@ class TestMutateBodyRaw:
         req = _parsed(b"a=1&b=2", "application/x-www-form-urlencoded")
         # старый вызов: 4 позиционных флага (query/form/json/headers)
         mutations = templating.get_mutations(req, True, True, True, False)
-        assert all(m.mutation_point in ("body_form", "query") for m in mutations)
+        assert all(m.mutation_point in ("body_form", "query", "path") for m in mutations)
 
     def test_apply_payload_raw_substitution(self):
         mutation = templating.mutate_body_raw(_parsed(XML_BODY, "application/xml"))[0]
@@ -335,7 +335,8 @@ class TestOnlyParams:
         hid = _insert_history("GET", "http://example.test/item?id=1&name=alice")
         for only in (None, [], ["", "  "]):
             tasks = scanner_core.build_scan_tasks([hid], ["sqli"], only_params=only)
-            assert {t.original_param for t in tasks} == {"id", "name"}
+            # path[0] — новый multi-boundary параметр (path-мутация включена)
+            assert {t.original_param for t in tasks} == {"id", "name", "path[0]"}
 
     def test_only_params_keeps_matching_hidden_in_mixed_history(self, tmp_db, monkeypatch):
         # query-параметр + raw body в одном запросе: фильтр оставляет только body.

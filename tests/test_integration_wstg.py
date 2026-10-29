@@ -409,7 +409,9 @@ def test_planner_keeps_new_active_checks(lab):
     by_check = collections.Counter(t.check_type for t in tasks)
     assert by_check["ssi_injection"] >= 15, by_check
     assert by_check["html_injection"] >= 25, by_check
-    assert all(t.mutation_point == "query" for t in tasks)
+    # multi-boundary: к query добавились path-мутации (/reflect → path[0]),
+    # cookie/multipart здесь нет — допустимы только query/path.
+    assert all(t.mutation_point in ("query", "path") for t in tasks)
 
 
 # ══════════════════════════════════════════════════════════════════

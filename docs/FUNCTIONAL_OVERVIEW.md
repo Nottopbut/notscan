@@ -139,3 +139,12 @@ HTTP-методы. Используется unit- и интеграционны�
 - Scan Config упрощён: профили **Quick / Standard / Full / Custom**, стена бейджей
   и advanced-опции спрятаны под «Customize checks» / «Advanced options».
 - DOCX-отчёт: landscape A4, фиксированные ширины колонок и повтор шапки таблицы.
+
+## Multi-boundary мутации и импорт Postman
+
+- Мутационные точки: query, form, JSON, **cookie**, **path-сегменты**, **multipart/form-data
+  (текстовые поля)**, заголовки, raw/XML. Включаются в Scan Config → Advanced →
+  Mutation points; `Only parameters` может ограничивать cookie/path/field.
+- Импорт Postman: при неразрешённых `{{переменных}}` GUI показывает их список и предлагает
+  загрузить env-файл (кнопка «⬆ Import environment»); переменные коллекции и окружения
+  подставляются в URL/headers/body; env — только на сессию.

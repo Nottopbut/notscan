@@ -1561,3 +1561,277 @@ def test_gui_scan_config_profiles_and_hidden_sections(tmp_path):
     assert data["full_cancel_start"] == 0
     assert data["full_confirm_start"] == 1
     assert data["cfg_destroyed"] is True
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Task-24: multi-boundary mutations + Postman environment import
+# ══════════════════════════════════════════════════════════════════
+
+_MULTIBOUNDARY_SCRIPT = r"""
+import json, sys
+sys.path.insert(0, ".")
+import notscan
+import scanner_core
+import db
+
+captured = []
+
+
+def fake_build(history_ids, enabled_checks, do_query=True, do_body_form=True,
+               do_body_json=True, do_headers=False, safe_mode=True,
+               planner_enabled=True, contracts=None, tamper_modes=None,
+               csrf_token_provider=None, only_params=None,
+               do_cookies=True, do_path=True, do_body_multipart=True):
+    captured.append({
+        "do_cookies": do_cookies,
+        "do_path": do_path,
+        "do_body_multipart": do_body_multipart,
+    })
+    return []
+
+
+scanner_core.build_scan_tasks = fake_build
+app = notscan.App()
+app.update()
+for cid in list(app._check_vars):
+    app._check_vars[cid].set(cid == "sqli")
+hid = db.insert_history(
+    method="GET", url="http://127.0.0.1:9/never?a=1",
+    req_headers={}, req_body=None, resp_status=200,
+    resp_headers={}, resp_body_preview=None,
+)
+app._scan_list = {hid: db.fetch_history_by_id(hid)}
+cfg = notscan.ScanConfigWindow(app)
+app.update()
+
+texts = []
+stack = [cfg]
+while stack:
+    widget = stack.pop()
+    try:
+        stack.extend(widget.winfo_children())
+    except Exception:
+        pass
+    try:
+        if "text" in widget.keys():
+            texts.append(str(widget.cget("text") or ""))
+    except Exception:
+        pass
+
+res = {
+    "has_vars": all(
+        hasattr(app, name)
+        for name in ("_mut_cookies", "_mut_path", "_mut_multipart")
+    ),
+    "defaults": [
+        bool(app._mut_cookies.get()),
+        bool(app._mut_path.get()),
+        bool(app._mut_multipart.get()),
+    ],
+    "has_checkbox_cookies": any(t.strip() == "Cookies" for t in texts),
+    "has_checkbox_path": any(t.strip() == "Path segments" for t in texts),
+    "has_checkbox_multipart": any(t.strip() == "Multipart form-data" for t in texts),
+}
+# 1) дефолтный запуск — все True
+app.after(0, app._run_scan)
+app.after(1500, app.quit)
+app.mainloop()
+# 2) запуск с выключенными multi-boundary
+app._mut_cookies.set(False)
+app._mut_path.set(False)
+app._mut_multipart.set(False)
+app.after(0, app._run_scan)
+app.after(1500, app.quit)
+app.mainloop()
+res["runs"] = captured
+print("RESULT_JSON " + json.dumps(res, ensure_ascii=False))
+app._proxy_shutdown_done = True
+app.destroy()
+print("GUI_OK")
+"""
+
+_ENV_IMPORT_SCRIPT = r"""
+import json, sys
+from pathlib import Path
+sys.path.insert(0, ".")
+from tkinter import filedialog
+import collection_io
+import notscan
+import db
+
+app = notscan.App()
+app.update()
+project = Path(app._project_dir)
+collection = project / "collection.json"
+collection.write_text(
+    json.dumps({"info": {"name": "c", "schema": "postman"},
+                "item": [{"request": {"method": "GET",
+                                      "url": "{{baseUrl}}/api"}}]}),
+    encoding="utf-8",
+)
+collection_fallback = project / "collection_fallback.json"
+collection_fallback.write_text(
+    json.dumps({"info": {"name": "c2", "schema": "postman"},
+                "item": [{"request": {"method": "GET",
+                                      "url": "{{baseUrl}}/api2"}}]}),
+    encoding="utf-8",
+)
+env_file = project / "env.json"
+env_file.write_text(
+    json.dumps({"name": "e", "values": [
+        {"key": "baseUrl", "value": "http://x.test", "enabled": True},
+    ]}),
+    encoding="utf-8",
+)
+
+calls = {"ask": [], "warn": [], "info": [], "dialogs": []}
+notscan.mb.askyesno = lambda title=None, message=None, *a, **k: (
+    calls["ask"].append((title, message)), True)[1]
+notscan.mb.showwarning = lambda *a, **k: calls["warn"].append(a)
+notscan.mb.showinfo = lambda *a, **k: calls["info"].append(a)
+
+dialog_results = []
+
+
+def fake_dialog(*_a, **kwargs):
+    calls["dialogs"].append(kwargs.get("title"))
+    return dialog_results.pop(0) if dialog_results else ""
+
+
+filedialog.askopenfilename = fake_dialog
+captured = {}
+
+
+def fake_missing(path, environment=None):
+    calls.setdefault("missing_envs", []).append(environment)
+    return [] if environment else ["baseUrl"]
+
+
+def fake_import(path, variables=None):
+    captured["variables"] = variables
+    captured["path"] = str(path)
+    return [{"method": "GET", "url": "http://x.test/api", "headers": {}, "body": None}]
+
+
+collection_io.postman_missing_variables = fake_missing
+collection_io.postman_environment = lambda path: {"baseUrl": "http://x.test"}
+collection_io.import_collection = fake_import
+
+res = {}
+
+# 1) Позитив: missing + env загружен → import с variables, History пополнена.
+dialog_results[:] = [str(collection), str(env_file)]
+app._import_collection()
+app.update()
+res["positive"] = {
+    "variables": captured.get("variables"),
+    "env": dict(app._postman_env),
+    "history": len(db.fetch_history(limit=50)),
+    "ask_count": len(calls["ask"]),
+    "info_count": len(calls["info"]),
+    "dialogs": list(calls["dialogs"]),
+}
+# 2) Негатив: переменных нет → env не спрашиваем, import без variables.
+calls["ask"].clear()
+captured.clear()
+app._postman_env.clear()
+collection_io.postman_missing_variables = lambda path, environment=None: []
+dialog_results[:] = [str(collection)]
+app._import_collection()
+app.update()
+res["negative"] = {
+    "variables": captured.get("variables"),
+    "ask_count": len(calls["ask"]),
+    "history": len(db.fetch_history(limit=50)),
+}
+# 3) Кнопка «⬆ Import environment»: env в память сессии + лог/диалог.
+app._postman_env.clear()
+dialog_results[:] = [str(env_file)]
+app._import_environment()
+app.update()
+res["button"] = {"env": dict(app._postman_env), "info_count": len(calls["info"])}
+# 4) Fallback без env-API collection_io (до мержа): локальный детектор/парсер.
+app._postman_env.clear()
+captured.clear()
+del collection_io.postman_missing_variables
+del collection_io.postman_environment
+dialog_results[:] = [str(collection_fallback), str(env_file)]
+app._import_collection()
+app.update()
+res["fallback_no_api"] = {
+    "variables": captured.get("variables"),
+    "env": dict(app._postman_env),
+}
+
+texts = []
+stack = [app]
+while stack:
+    widget = stack.pop()
+    try:
+        stack.extend(widget.winfo_children())
+    except Exception:
+        pass
+    try:
+        if "text" in widget.keys():
+            texts.append(str(widget.cget("text") or ""))
+    except Exception:
+        pass
+res["has_env_button"] = any("Import environment" in t for t in texts)
+print("RESULT_JSON " + json.dumps(res, ensure_ascii=False))
+app._proxy_shutdown_done = True
+app.destroy()
+print("GUI_OK")
+"""
+
+
+@pytest.mark.integration
+def test_gui_multiboundary_mutation_checkboxes_and_kwargs(tmp_path):
+    """Cookies/Path/Multipart: чекбоксы в Advanced, default True, kwargs в build_scan_tasks."""
+    project = _copy_project(tmp_path)
+    data = _run_gui_script(project, _MULTIBOUNDARY_SCRIPT, timeout=240)
+
+    assert data["has_vars"] is True
+    assert data["defaults"] == [True, True, True], data["defaults"]
+    assert data["has_checkbox_cookies"] is True, "нет чекбокса Cookies"
+    assert data["has_checkbox_path"] is True, "нет чекбокса Path segments"
+    assert data["has_checkbox_multipart"] is True, "нет чекбокса Multipart form-data"
+
+    runs = data.get("runs", [])
+    assert len(runs) >= 2, f"build_scan_tasks вызван {len(runs)} раз: {runs}"
+    assert runs[0] == {
+        "do_cookies": True, "do_path": True, "do_body_multipart": True,
+    }, runs[0]
+    assert runs[1] == {
+        "do_cookies": False, "do_path": False, "do_body_multipart": False,
+    }, runs[1]
+
+
+@pytest.mark.integration
+def test_gui_postman_environment_import_flow(tmp_path):
+    """Env-флоу импорта: missing → env → import с variables; негатив; кнопка; fallback."""
+    project = _copy_project(tmp_path)
+    data = _run_gui_script(project, _ENV_IMPORT_SCRIPT, timeout=300)
+
+    # 1) Позитив: спросили env, загрузили, импортировали с variables.
+    positive = data["positive"]
+    assert positive["variables"] == {"baseUrl": "http://x.test"}, positive
+    assert positive["env"] == {"baseUrl": "http://x.test"}
+    assert positive["history"] == 1, "импорт не добавил записи в History"
+    assert positive["ask_count"] == 1, "должен быть ровно один вопрос про env"
+    assert len(positive["dialogs"]) == 2, positive["dialogs"]  # collection + env
+
+    # 2) Негатив: без missing переменных env не спрашивается.
+    negative = data["negative"]
+    assert negative["ask_count"] == 0, "лишний вопрос про окружение"
+    assert negative["variables"] is None, negative
+    assert negative["history"] == 2
+
+    # 3) Кнопка Import environment кладёт env в память сессии.
+    assert data["button"]["env"] == {"baseUrl": "http://x.test"}
+
+    # 4) Fallback без env-API (до мержа Lead): локальные детектор/парсер работают.
+    fallback = data["fallback_no_api"]
+    assert fallback["variables"] == {"baseUrl": "http://x.test"}, fallback
+    assert fallback["env"] == {"baseUrl": "http://x.test"}
+
+    assert data["has_env_button"] is True, "нет кнопки ⬆ Import environment"

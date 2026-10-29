@@ -1220,8 +1220,9 @@ def test_build_scan_tasks_keeps_new_active_checks(tmp_db):
     )
     types = {t.check_type for t in tasks}
     assert types == {"ssi_injection", "html_injection"}
-    expected = (len(scanner_core.load_payloads("ssi_injection"))
-                + len(scanner_core.load_payloads("html_injection")))
+    # query (name) + path (api) = 2 мутации на payload
+    expected = 2 * (len(scanner_core.load_payloads("ssi_injection"))
+                    + len(scanner_core.load_payloads("html_injection")))
     assert len(tasks) == expected, f"planner потерял задачи: {len(tasks)} != {expected}"
 
 

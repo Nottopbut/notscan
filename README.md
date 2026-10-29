@@ -64,6 +64,16 @@ and reports.
 - **Raw/XML body mutations** — XML/SOAP/PHP-serialized and other raw bodies get a
   `body_raw` mutation point, so **XXE** and **insecure deserialization** checks actually
   generate requests (previously declarative-only).
+- **Multi-boundary mutations** — injections are tested in **query parameters, form bodies,
+  JSON, cookies, URL path segments, multipart/form-data text fields, headers and raw bodies**
+  (XML/SOAP/PHP-serialized). Each boundary can be toggled in Scan Config → Advanced →
+  Mutation points; `Only parameters` also accepts cookie names, `path[0]`… and form field
+  names. File parts of multipart requests are preserved byte-for-byte (not mutated).
+- **Postman import with environments** — History → ⬆ Import understands Postman collections;
+  if a collection uses `{{variables}}`, notscan lists the missing ones, offers to load a
+  Postman environment/globals file (**⬆ Import environment**), resolves collection
+  variables + environment values in URLs/headers/bodies and only then imports. The env is
+  kept in memory for the session (values are not logged).
 - **RU/EN interface** — the whole GUI (tabs, buttons, dialogs, tutorial, check names/descriptions,
   statuses) is available in **English and Russian**; switch it in Settings → Language
   (applies after restart). Reports (MD/HTML/DOCX) are localised too; technical log lines
@@ -144,7 +154,7 @@ make smoke    # headless GUI smoke test in xvfb on a temp copy of the project
 The repository ships a self-contained HTTP lab (`tests/lab/`) with intentionally vulnerable
 endpoints (reflected XSS, escaped reflection, SQL errors, redirects, delayed responses,
 CSRF-protected form, JSON API, cookie/CORS/SSRF/SSI cases, sensitive files/metafiles) used
-by 493 unit and integration tests. Proxy-lifecycle integration tests are skipped
+by 526 unit and integration tests. Proxy-lifecycle integration tests are skipped
 automatically when mitmproxy or a display is unavailable.
 
 ## Project structure

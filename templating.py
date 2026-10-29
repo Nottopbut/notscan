@@ -9,6 +9,9 @@ templating.py — Разбор и мутация raw HTTP-запросов.
       - application/x-www-form-urlencoded body
       - JSON body
       - raw body (XML/SOAP/PHP-serialized/прочие сырые тела) — для XXE/deserialization
+      - cookie-значения (по одному)
+      - path-сегменты URL (по одному, статика пропускается)
+      - multipart/form-data текстовые поля (файлы не трогаем)
       - заголовки (кастомные)
 """
 
@@ -181,6 +184,11 @@ def mutate_body_form(req: ParsedRequest) -> list[MutatedRequest]:
     if not req.body:
         return []
     ct = req.content_type.lower()
+    # multipart/form-data — НЕ urlencoded-форма: у него отдельная мутация
+    # mutate_body_multipart; иначе regex-эвристика ниже приняла бы
+    # `name="field"` за параметр формы и наплодила мусорные body_form-задачи.
+    if "multipart/form-data" in ct:
+        return []
     # Никогда не парсим JSON как form
     body_start = req.body.lstrip()[:1]
     if body_start in (b"{", b"["):
@@ -420,6 +428,199 @@ def mutate_headers(req: ParsedRequest) -> list[MutatedRequest]:
     return results
 
 
+#: Расширения статики: path-сегменты с ними НЕ мутируем (шум и бессмысленно).
+STATIC_PATH_EXTENSIONS: tuple[str, ...] = (
+    ".css", ".js", ".mjs", ".cjs", ".jsx", ".map",
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".webp", ".avif",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".mp4", ".webm", ".mp3", ".wav", ".pdf",
+)
+
+_MULTIPART_CT_MARKER = "multipart/form-data"
+_MULTIPART_BOUNDARY_RE = re.compile(r'boundary\s*=\s*"?([^";]+)"?', re.IGNORECASE)
+_PART_NAME_RE = re.compile(r'name\s*=\s*"([^"]*)"', re.IGNORECASE)
+_PART_NAME_UNQUOTED_RE = re.compile(r"name\s*=\s*([^;\s]+)", re.IGNORECASE)
+_PART_FILENAME_RE = re.compile(r"filename\s*=", re.IGNORECASE)
+
+
+def _header_key(headers: dict, name: str) -> Optional[str]:
+    """Case-insensitive поиск реального имени заголовка в словаре."""
+    lowered = (name or "").lower()
+    for key in headers:
+        if str(key).lower() == lowered:
+            return key
+    return None
+
+
+def mutate_cookies(req: ParsedRequest) -> list[MutatedRequest]:
+    """Подставляет PLACEHOLDER в значение КАЖДОЙ cookie по отдельности.
+
+    Cookie: ``theme=dark; session=abc`` → две мутации:
+    ``cookie:theme`` (меняется только theme, session сохранён) и ``cookie:session``.
+    mutation_point = ``cookie:<name>``, original_param = ``<name>``.
+    """
+    cookie_key = _header_key(req.headers, "cookie")
+    if cookie_key is None:
+        return []
+    raw_cookie = (req.headers.get(cookie_key) or "").strip()
+    if not raw_cookie:
+        return []
+
+    parts = [part.strip() for part in raw_cookie.split(";") if part.strip()]
+    if not parts:
+        return []
+
+    results: list[MutatedRequest] = []
+    for index, part in enumerate(parts):
+        name, sep, value = part.partition("=")
+        name = name.strip()
+        if not name:
+            continue
+        new_parts = list(parts)
+        new_parts[index] = f"{name}={PLACEHOLDER}"
+        new_headers = {
+            k: v for k, v in req.headers.items() if k.lower() != "content-length"
+        }
+        new_headers[cookie_key] = "; ".join(new_parts)
+        raw = build_raw_http(req.method, req.url, new_headers, req.body)
+        results.append(
+            MutatedRequest(
+                method=req.method,
+                url=req.url,
+                headers=new_headers,
+                body=req.body,
+                mutation_point=f"cookie:{name}",
+                original_param=name,
+                raw_http=raw,
+            )
+        )
+    return results
+
+
+def mutate_path(req: ParsedRequest) -> list[MutatedRequest]:
+    """Подставляет PLACEHOLDER в каждый динамический path-сегмент URL.
+
+    ``/api/v1/users/123`` → мутации ``path[1]`` … ``path[4]`` (query/fragment
+    сохраняются). Статические расширения (.css/.js/картинки/шрифты) и пустые
+    сегменты пропускаются. mutation_point = ``path``,
+    original_param = ``path[<index>]``.
+    """
+    parsed = urllib.parse.urlsplit(req.url)
+    path = parsed.path or ""
+    if not path or path == "/":
+        return []
+
+    segments = path.split("/")
+    non_empty = [(index, seg) for index, seg in enumerate(segments) if seg]
+    if not non_empty:
+        return []
+    # Если последний сегмент — статика (.css/.js/.png/...), весь URL считаем
+    # статическим ассетом и path-мутации не генерируем (иначе шум).
+    if non_empty[-1][1].lower().endswith(STATIC_PATH_EXTENSIONS):
+        return []
+
+    results: list[MutatedRequest] = []
+    for ordinal, (index, segment) in enumerate(non_empty):
+        if segment.lower().endswith(STATIC_PATH_EXTENSIONS):
+            continue
+        new_segments = list(segments)
+        new_segments[index] = PLACEHOLDER
+        new_path = "/".join(new_segments)
+        new_url = urllib.parse.urlunsplit(parsed._replace(path=new_path))
+        new_headers = {
+            k: v for k, v in req.headers.items() if k.lower() != "content-length"
+        }
+        raw = build_raw_http(req.method, new_url, new_headers, req.body)
+        results.append(
+            MutatedRequest(
+                method=req.method,
+                url=new_url,
+                headers=new_headers,
+                body=req.body,
+                mutation_point="path",
+                original_param=f"path[{ordinal}]",
+                raw_http=raw,
+            )
+        )
+    return results
+
+
+def _multipart_boundary(req: ParsedRequest) -> Optional[str]:
+    """Достаёт boundary из Content-Type multipart/form-data (None — нет)."""
+    content_type = req.content_type or ""
+    if _MULTIPART_CT_MARKER not in content_type.lower():
+        return None
+    match = _MULTIPART_BOUNDARY_RE.search(content_type)
+    if not match:
+        return None
+    boundary = match.group(1).strip().strip('"').strip("'")
+    return boundary or None
+
+
+def mutate_body_multipart(req: ParsedRequest) -> list[MutatedRequest]:
+    """Подставляет PLACEHOLDER в текстовые поля multipart/form-data.
+
+    Файловые части (``filename=...``) НЕ трогаются. Boundary, заголовки частей,
+    порядок и завершающий ``--boundary--`` сохраняются побайтово; меняется
+    только значение одного текстового поля на мутацию. Поддерживаются CRLF и
+    LF-разделители. mutation_point = ``body_multipart``,
+    original_param = ``<имя поля>``.
+    """
+    boundary = _multipart_boundary(req)
+    if not boundary or not req.body:
+        return []
+
+    delimiter = b"--" + boundary.encode("utf-8", errors="replace")
+    chunks = req.body.split(delimiter)
+    if len(chunks) < 2:
+        return []
+
+    results: list[MutatedRequest] = []
+    for chunk_index in range(1, len(chunks)):
+        chunk = chunks[chunk_index]
+        # закрывающий boundary: --boundary--
+        if chunk.startswith(b"--"):
+            continue
+        if b"\r\n\r\n" in chunk:
+            head, sep, _content = chunk.partition(b"\r\n\r\n")
+            line_end = b"\r\n"
+        elif b"\n\n" in chunk:
+            head, sep, _content = chunk.partition(b"\n\n")
+            line_end = b"\n"
+        else:
+            continue
+
+        head_text = head.decode("utf-8", errors="replace")
+        if _PART_FILENAME_RE.search(head_text):
+            continue  # файлы не мутируем (отдельная фича)
+        name_match = _PART_NAME_RE.search(head_text) or _PART_NAME_UNQUOTED_RE.search(head_text)
+        if not name_match:
+            continue
+        field_name = name_match.group(1)
+        if not field_name:
+            continue
+
+        new_chunks = list(chunks)
+        new_chunks[chunk_index] = head + sep + PLACEHOLDER.encode("utf-8") + line_end
+        new_body = delimiter.join(new_chunks)
+        new_headers = {
+            k: v for k, v in req.headers.items() if k.lower() != "content-length"
+        }
+        raw = build_raw_http(req.method, req.url, new_headers, new_body)
+        results.append(
+            MutatedRequest(
+                method=req.method,
+                url=req.url,
+                headers=new_headers,
+                body=new_body,
+                mutation_point="body_multipart",
+                original_param=field_name,
+                raw_http=raw,
+            )
+        )
+    return results
+
+
 def get_mutations(
     req: ParsedRequest,
     do_query: bool = True,
@@ -427,13 +628,19 @@ def get_mutations(
     do_body_json: bool = True,
     do_headers: bool = False,
     do_body_raw: bool = True,
+    do_cookies: bool = True,
+    do_path: bool = True,
+    do_body_multipart: bool = True,
 ) -> list[MutatedRequest]:
     """Возвращает все мутации по выбранным точкам.
 
     ``do_body_raw`` (default True) добавляет raw-мутацию для XML/SOAP/сырых
     тел; движок разрешает её только для XXE/deserialization (см.
-    scanner_core.build_scan_tasks). Параметр добавлен последним с дефолтом —
-    старые вызовы работают как раньше.
+    scanner_core.build_scan_tasks).
+
+    Multi-boundary (добавлены последними, с дефолтами True — старые вызовы
+    не ломаются): ``do_cookies`` — по одной cookie, ``do_path`` — по одному
+    path-сегменту, ``do_body_multipart`` — текстовые поля multipart/form-data.
     """
     result = []
     if do_query:
@@ -446,6 +653,12 @@ def get_mutations(
         result.extend(mutate_headers(req))
     if do_body_raw:
         result.extend(mutate_body_raw(req))
+    if do_cookies:
+        result.extend(mutate_cookies(req))
+    if do_path:
+        result.extend(mutate_path(req))
+    if do_body_multipart:
+        result.extend(mutate_body_multipart(req))
     return result
 
 
@@ -496,8 +709,10 @@ def apply_payload(
 ) -> tuple[str, dict, bytes]:
     """Подставляет payload вместо PLACEHOLDER. Возвращает (url, headers, body).
 
-    В URL payload кодируется через urllib.parse.quote (safe=''),
-    в headers и body — подставляется как есть (строка).
+    В URL payload кодируется через urllib.parse.quote (safe='') — это же
+    покрывает path-сегменты (структура URL не ломается). В headers и body —
+    подставляется как есть (строка): подходит для cookie (header), multipart
+    и body_raw. Спец-экранирование только для body_json.
 
     ``encoder``: сначала payload прогоняется через encode_payload(payload, encoder),
     затем подставляется (tamper/WAF-bypass, см. TAMPER_MODES).

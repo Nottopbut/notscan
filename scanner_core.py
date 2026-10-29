@@ -720,6 +720,9 @@ def build_scan_tasks(
     csrf_token_provider: Callable[[], str | None] | None = None,
     do_body_raw: bool = True,
     only_params: list[str] | None = None,
+    do_cookies: bool = True,
+    do_path: bool = True,
+    do_body_multipart: bool = True,
 ) -> list[ScanTask]:
     """
     Для каждого history_id × check_type × mutation_point × payload
@@ -743,6 +746,12 @@ def build_scan_tasks(
     only_params: если задан список имён — оставляем только мутации, у которых
         ``mutation.original_param`` входит в список (case-insensitive). Для
         raw-тела имя — "body". Пустой/None = без фильтра.
+
+    do_cookies / do_path / do_body_multipart (multi-boundary, default True):
+        мутации значений cookie (``cookie:<name>``), path-сегментов URL (``path``)
+        и текстовых полей multipart/form-data (``body_multipart``). Для XXE
+        новые точки не используются (только XML/raw тело); body_raw-gate не
+        меняется.
     """
     tasks: list[ScanTask] = []
 
@@ -770,7 +779,7 @@ def build_scan_tasks(
 
         # json-like params: prefer NoSQLi/deserialization, avoid open_redirect
         if pt == "json" and ct in ("nosql_injection", "deserialization"):
-            return mp in ("body_json", "body_form", "query", "body_raw")
+            return mp in ("body_json", "body_form", "query", "body_raw", "body_multipart")
         if pt == "json" and ct in ("open_redirect",):
             return False
 
@@ -825,6 +834,9 @@ def build_scan_tasks(
             do_body_json=do_body_json,
             do_headers=do_headers,
             do_body_raw=do_body_raw,
+            do_cookies=do_cookies,
+            do_path=do_path,
+            do_body_multipart=do_body_multipart,
         )
 
         # only_params: GUI-выбор «в какой параметр инъектить». Для raw-тела

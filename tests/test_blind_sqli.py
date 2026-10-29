@@ -337,7 +337,8 @@ class TestBuildScanTasks:
         assert all(t.check_type == "sqli_blind" for t in tasks)
         assert all(t.is_pair for t in tasks), "все blind-задачи должны быть парами"
         # 2 query-параметра + 2 form-поля + 1 json-поле = 5 мутаций × пары
-        assert len(tasks) == (2 + 2 + 1) * len(self.PAIRS)
+        # + path-сегмент в каждом из 3 URL (item/form/api) × пары
+        assert len(tasks) == (2 + 2 + 1 + 3) * len(self.PAIRS)
 
         for task in tasks:
             assert task.pair_payload
@@ -367,7 +368,7 @@ class TestBuildScanTasks:
         safe_tasks = scanner_core.build_scan_tasks([h], ["sqli_blind"], safe_mode=True)
         assert safe_tasks == [], "safe_mode должен отбросить деструктивные пары"
         unsafe_tasks = scanner_core.build_scan_tasks([h], ["sqli_blind"], safe_mode=False)
-        assert len(unsafe_tasks) == 1
+        assert len(unsafe_tasks) == 2  # query + path
 
     def test_scan_task_backward_compatibility(self):
         task = scanner_core.ScanTask(
@@ -410,7 +411,7 @@ class TestAsyncWorkerBlind:
             resp_status=200,
             resp_body_preview=b"<html><body><h1>User: admin</h1></body></html>",
         )
-        tasks = scanner_core.build_scan_tasks([hid], ["sqli_blind"])
+        tasks = scanner_core.build_scan_tasks([hid], ["sqli_blind"], do_path=False)
         assert len(tasks) == len(self.PAIRS)
 
         _run(tasks)
@@ -456,7 +457,7 @@ class TestAsyncWorkerBlind:
             resp_status=200,
             resp_body_preview=b"<html><body><h1>User: admin</h1></body></html>",
         )
-        tasks = scanner_core.build_scan_tasks([hid], ["sqli_blind"])
+        tasks = scanner_core.build_scan_tasks([hid], ["sqli_blind"], do_path=False)
         assert len(tasks) == 1
         task = tasks[0]
         # false-запрос уводим на закрытый порт → transport error
