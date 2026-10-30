@@ -5,8 +5,7 @@ HTTP(S) traffic through a built-in proxy, turns captured requests into mutation-
 security tests, runs them with an async scan engine and stores findings with evidence
 and reports.
 
-> ⚠️ **Authorization required.** Use notscan only against applications you own or have
-> explicit written permission to test. The authors are not responsible for misuse.
+
 
 🇷🇺 [Русская версия README](README.md)
 
