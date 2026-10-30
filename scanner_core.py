@@ -264,11 +264,15 @@ class RateLimiter:
         min_rps = self.min_rps
         interval = 0.0
         if max_rps > 0 and min_rps > 0 and min_rps <= max_rps:
-            interval = random.uniform(1.0 / max_rps, 1.0 / min_rps)
+            # Сэмплируем СКОРОСТЬ в [min,max], а интервал = 1/rate. Раньше
+            # сэмплировали интервал — средняя скорость уезжала к min
+            # (гармоническое среднее), и казалось, что Max RPS «не влияет».
+            rate = random.uniform(min_rps, max_rps)
+            interval = 1.0 / rate
         elif max_rps > 0:
             interval = 1.0 / max_rps
-        elif min_rps > 0:
-            interval = 1.0 / min_rps
+        # Только Min без Max: верхнего предела нет — не тормозим скан
+        # искусственно (интерфейс подсказывает задать Max).
         if self.delay_ms > 0:
             interval = max(interval, self.delay_ms / 1000.0)
         return interval
@@ -2085,6 +2089,8 @@ def _persist_task_result(
     log_cb: Callable[[str], None],
     detector: str = "matcher",
     confidence: Optional[float] = None,
+    calibration_cache: Optional[dict] = None,
+    calibration_lock: Optional[threading.Lock] = None,
 ) -> None:
     """Все синхронные записи по одной задаче (вызывается через asyncio.to_thread).
 
@@ -2156,28 +2162,51 @@ def _persist_task_result(
         if (task.check_type or "").lower() not in ("sqli_time", "sqli_blind"):
             host = urlparse(task.url).hostname or ""
             if host:
-                prev = db.fetch_host_calibration(host) or {}
-                p50 = float(prev.get("baseline_ms_p50") or 0.0)
-                p95 = float(prev.get("baseline_ms_p95") or 0.0)
-                rate5xx = float(prev.get("typical_5xx_rate") or 0.0)
+                def _update(prev: dict, p50: float, p95: float, rate5xx: float):
+                    alpha = 0.1
+                    if elapsed_ms_obs > 0:
+                        p50 = (p50 * (1 - alpha) + elapsed_ms_obs * alpha) if p50 > 0 else elapsed_ms_obs
+                        p95_candidate = max(elapsed_ms_obs, p50 * 1.8)
+                        p95 = (p95 * (1 - alpha) + p95_candidate * alpha) if p95 > 0 else p95_candidate
+                    is5xx = 1.0 if (isinstance(status_code, int) and 500 <= status_code <= 599) else 0.0
+                    rate5xx = (rate5xx * (1 - alpha) + is5xx * alpha) if rate5xx > 0 else is5xx
+                    prev.update({
+                        "baseline_ms_p50": p50,
+                        "baseline_ms_p95": p95,
+                        "typical_5xx_rate": rate5xx,
+                        "notes": "ema",
+                    })
 
-                # Exponential moving averages; conservative p95 proxy
-                alpha = 0.1
-                if elapsed_ms_obs > 0:
-                    p50 = (p50 * (1 - alpha) + elapsed_ms_obs * alpha) if p50 > 0 else elapsed_ms_obs
-                    p95_candidate = max(elapsed_ms_obs, p50 * 1.8)
-                    p95 = (p95 * (1 - alpha) + p95_candidate * alpha) if p95 > 0 else p95_candidate
-
-                is5xx = 1.0 if (isinstance(status_code, int) and 500 <= status_code <= 599) else 0.0
-                rate5xx = (rate5xx * (1 - alpha) + is5xx * alpha) if rate5xx > 0 else is5xx
-
-                db.upsert_host_calibration(
-                    host=host,
-                    baseline_ms_p50=p50,
-                    baseline_ms_p95=p95,
-                    typical_5xx_rate=rate5xx,
-                    notes="ema",
-                )
+                if calibration_cache is not None:
+                    # In-memory EMA: один upsert на хост при завершении скана,
+                    # а не SELECT+UPSERT на каждую из тысяч задач.
+                    lock = calibration_lock or threading.Lock()
+                    with lock:
+                        entry = calibration_cache.get(host)
+                        if entry is None:
+                            prev = db.fetch_host_calibration(host) or {}
+                            entry = {
+                                "baseline_ms_p50": float(prev.get("baseline_ms_p50") or 0.0),
+                                "baseline_ms_p95": float(prev.get("baseline_ms_p95") or 0.0),
+                                "typical_5xx_rate": float(prev.get("typical_5xx_rate") or 0.0),
+                            }
+                            calibration_cache[host] = entry
+                        _update(
+                            entry,
+                            entry["baseline_ms_p50"],
+                            entry["baseline_ms_p95"],
+                            entry["typical_5xx_rate"],
+                        )
+                else:
+                    prev = db.fetch_host_calibration(host) or {}
+                    entry = {
+                        "baseline_ms_p50": float(prev.get("baseline_ms_p50") or 0.0),
+                        "baseline_ms_p95": float(prev.get("baseline_ms_p95") or 0.0),
+                        "typical_5xx_rate": float(prev.get("typical_5xx_rate") or 0.0),
+                    }
+                    _update(entry, entry["baseline_ms_p50"], entry["baseline_ms_p95"],
+                            entry["typical_5xx_rate"])
+                    db.upsert_host_calibration(host=host, notes="ema", **entry)
     except Exception as cal_exc:
         logger.debug("host calibration update failed: %s", cal_exc)
 
@@ -2288,6 +2317,11 @@ class ScannerRunner:
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._done = threading.Event()
+        # Baseline/calibration кеши: убирают SELECT на каждую задачу (тысячи
+        # лишних DB-запросов) и пишут калибровку один раз в конце скана.
+        self._baseline_cache: dict[int, tuple[Optional[dict], str]] = {}
+        self._calibration_cache: dict[str, dict] = {}
+        self._calibration_lock = threading.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._async_q: Optional[asyncio.Queue] = None
         self._consumer_tasks: list[asyncio.Task] = []
@@ -2299,6 +2333,24 @@ class ScannerRunner:
         if self._threads:
             self.log_cb("[SCAN] already running")
             return
+
+        # Preload baseline-ответов истории (один SELECT на history_id вместо
+        # SELECT на каждую задачу — ускоряет скан в разы).
+        try:
+            unique_ids = {t.history_id for t in self.tasks if t.history_id is not None}
+            self._baseline_cache = {}
+            for hid in unique_ids:
+                rec = db.fetch_history_by_id(hid)
+                text = ""
+                if rec:
+                    bb = rec.get("resp_body_preview")
+                    if bb:
+                        text = (bb.decode("utf-8", errors="replace")
+                                if isinstance(bb, bytes) else str(bb))
+                self._baseline_cache[hid] = (rec, text)
+        except Exception as exc:
+            logger.debug("baseline preload failed: %s", exc)
+            self._baseline_cache = {}
 
         session_headers = self._login_session()
 
@@ -2403,6 +2455,19 @@ class ScannerRunner:
                 "details_logged": self._scope_details_logged,
                 "examples": list(self._scope_examples),
             }
+
+    def _flush_calibrations(self) -> None:
+        """Записывает накопленную in-memory калибровку хостов одним батчем."""
+        with self._calibration_lock:
+            items = list(self._calibration_cache.items())
+            self._calibration_cache.clear()
+        for host, values in items:
+            try:
+                payload = dict(values or {})
+                payload.pop("notes", None)
+                db.upsert_host_calibration(host=host, notes="ema", **payload)
+            except Exception as exc:
+                logger.debug("calibration flush failed for %s: %s", host, exc)
 
     def _log_scope_summary(self) -> None:
         with self._scope_lock:
@@ -2559,6 +2624,10 @@ class ScannerRunner:
             for client in clients:
                 with contextlib.suppress(Exception):
                     await client.aclose()
+            # Калибровка: один upsert на хост в конце скана (вместо SELECT+UPSERT
+            # на каждую задачу) — заметно ускоряет большие сканы.
+            with contextlib.suppress(Exception):
+                self._flush_calibrations()
             # Один агрегированный итог по scope/auth вместо per-request логов.
             with contextlib.suppress(Exception):
                 self._log_scope_summary()
@@ -2701,22 +2770,16 @@ class ScannerRunner:
                     )
                     self._stop.set()
 
-            # ── Baseline-aware detection (differential analysis) ──
-            try:
-                if task.history_id is not None:
-                    baseline_row = await asyncio.to_thread(
-                        db.fetch_history_by_id, task.history_id
-                    )
-                    if baseline_row:
-                        baseline_status = baseline_row.get("resp_status")
-                        bb = baseline_row.get("resp_body_preview")
-                        if bb:
-                            baseline_text = (
-                                bb.decode("utf-8", errors="replace")
-                                if isinstance(bb, bytes)
-                                else str(bb)
-                            )
-            except Exception:
+            # ── Baseline-aware detection: из preload-кеша (без DB-запроса) ──
+            if task.history_id is not None:
+                cached_row, cached_text = self._baseline_cache.get(
+                    task.history_id, (None, "")
+                )
+                if cached_row:
+                    baseline_row = cached_row
+                    baseline_status = cached_row.get("resp_status")
+                    baseline_text = cached_text or ""
+            else:
                 baseline_row = None
 
             # ── Boolean-blind SQLi (sqli_blind): второй (false) запрос пары ──
@@ -2864,6 +2927,8 @@ class ScannerRunner:
                 self.log_cb,
                 detector=blind_detector,
                 confidence=blind_confidence,
+                calibration_cache=self._calibration_cache,
+                calibration_lock=self._calibration_lock,
             )
         except asyncio.CancelledError:
             raise

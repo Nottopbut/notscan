@@ -176,11 +176,18 @@ class TestRateLimiterIntervals:
         deltas = self._measure_sync(limiter, clock, monkeypatch, 5)
         assert all(abs(d - 0.25) < 1e-6 for d in deltas), deltas
 
-    def test_min_rps_only_interval(self, monkeypatch):
+    def test_min_rps_only_does_not_pace(self, monkeypatch):
+        # Min без Max: верхнего предела нет — скан не тормозим искусственно.
         clock = FakeClock()
         limiter = scanner_core.RateLimiter(min_rps=2, clock=clock)
-        deltas = self._measure_sync(limiter, clock, monkeypatch, 4)
-        assert all(abs(d - 0.5) < 1e-6 for d in deltas), deltas
+        monkeypatch.setattr(
+            scanner_core.time, "sleep",
+            lambda s: (_ for _ in ()).throw(AssertionError("sleep called")),
+        )
+        limiter.acquire()
+        limiter.acquire()
+        assert limiter.enabled is True
+        assert limiter.total_wait_s == 0.0
 
     def test_min_max_range(self, monkeypatch):
         clock = FakeClock()

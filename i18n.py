@@ -774,7 +774,8 @@ _RAW_MESSAGES: tuple[tuple[str, str], ...] = (
         "authorization is needed; check Cookie/OTP/auto-login.",
         "{count} ответов с 401/403 — возможно, сессия истекла или нужна "
         "авторизация; проверь Cookie/OTP/авто-логин.",
-    ),
+    ),    ("Route scan traffic through the local proxy (slower; normally OFF)", "Гнать трафик скана через локальный прокси (медленнее; обычно ВЫКЛ)"),
+
 )
 
 import re as _re

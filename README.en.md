@@ -82,9 +82,15 @@ and reports.
   finalizes itself even if the progress-poll chain fails — no need to press “Stop Scan”.
   401/403 warnings are separated from informational login redirects.
 - **Rate limiting** — next to Workers in Advanced: **Min RPS**, **Max RPS** and
-  **Delay (ms)**. Min+Max produce random pacing between 1/max and 1/min; Delay is a
-  fixed pause; 0 disables the limit. A global async rate limiter is used (sqli_blind
-  pairs included).
+  **Delay (ms)**. With Min+Max the target rate is sampled uniformly in [min,max] rps;
+  Max alone is a hard cap; Delay is a fixed pause; 0 disables the limit. After a scan
+  the log shows the actual speed (`[SCAN] Speed: … tasks/s`, `Rate limit applied: …`).
+  The old Settings→ROE “Max requests/sec” field was removed (it no longer overrides
+  the new fields).
+- **Scan traffic goes direct, not through the proxy** — by default scanner requests are
+  not routed through mitmproxy (that slowed large scans and polluted History with scan
+  traffic). An optional “Route scan traffic through the local proxy” checkbox is in
+  Advanced.
 - **Local/private targets & scope** — hosts from the Scan list are automatically put into
   the allowlist (explicit authorization), so localhost/private targets are not blocked;
   a private target gets a one-time confirmation. Instead of per-request

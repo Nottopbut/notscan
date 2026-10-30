@@ -1793,10 +1793,16 @@ class ScanConfigWindow(tk.Toplevel):
         self._roe_delay_ms_entry.pack(side=tk.LEFT)
         ttk.Label(
             adv,
-            text="Max RPS limits speed; Min+Max = random interval 1/max..1/min; "
-                 "Delay = fixed pause between requests.",
+            text="Max RPS = верхний предел скорости; Min+Max = случайная скорость "
+                 "в диапазоне [min,max] запросов/с (без Max — без лимита); "
+                 "Delay = фиксированная пауза между запросами.",
             foreground="#a6adc8", wraplength=700, justify="left",
         ).pack(anchor="w", padx=10)
+        ttk.Checkbutton(
+            adv,
+            text="Route scan traffic through the local proxy (slower; normally OFF)",
+            variable=p._scan_via_proxy_var,
+        ).pack(anchor="w", padx=10, pady=(0, 2))
 
         ttk.Checkbutton(
             adv, text="Safe mode (exclude destructive payloads: DROP/INSERT/UPDATE/exec)",
@@ -2203,6 +2209,7 @@ class App(tk.Tk):
         for _cid, _on in check_var_defs():
             self._check_vars[_cid] = tk.BooleanVar(value=_on)
         self._workers_var = tk.StringVar(value="10")
+        self._scan_via_proxy_var = tk.BooleanVar(value=False)
         # Куда инжектить (ScanConfig → build_scan_tasks/run_probe_scan), персист в settings.
         self._inject_headers_var = tk.StringVar(value=DEFAULT_INJECT_HEADERS_STR)
         self._only_params_var = tk.StringVar(value="")
@@ -3000,7 +3007,9 @@ class App(tk.Tk):
                   font=("Segoe UI", 11, "bold"), foreground="#89b4fa").grid(
             row=row, column=0, columnspan=2, sticky="w", padx=12, pady=(12, 4))
         row += 1
-        self._roe_max_rps_entry = labeled_entry("Max requests/sec (0 = unlimited):", "0", width=10)
+        # Rate limiting перенесён в Advanced окна Scan (Min/Max RPS/Delay);
+        # старое поле Settings удалено, чтобы не было двух источников истины.
+        self._roe_max_rps_entry = None
         self._roe_block_checks_entry = labeled_entry(
             "Block check types (comma-separated; applied before task build):",
             "file_upload,ssrf,xxe,deserialization",
@@ -3233,9 +3242,10 @@ class App(tk.Tk):
             var = getattr(self, "_scope_block_private_var", None)
             if var is not None:
                 out["scope_block_private"] = bool(var.get())
-            entry = getattr(self, "_roe_max_rps_entry", None)
-            old_max = (entry.get() or "0").strip() if entry is not None else "0"
-            out["roe_max_rps"] = old_max
+            new_max_var = self.__dict__.get("_roe_max_rps_var")
+            out["roe_max_rps"] = (
+                str(new_max_var.get() or "0").strip() if new_max_var is not None else "0"
+            )
             for _key, _attr in (
                 ("min_rps", "_roe_min_rps_var"),
                 ("max_rps", "_roe_max_rps_var"),
@@ -3244,17 +3254,8 @@ class App(tk.Tk):
                 var = self.__dict__.get(_attr)
                 if var is not None:
                     out[_key] = (var.get() or "0").strip()
-            # Единый источник: новое Max RPS поле синхронизируем в старое Settings-поле.
-            new_max_var = self.__dict__.get("_roe_max_rps_var")
-            if entry is not None and new_max_var is not None:
-                new_value = str(new_max_var.get() or "").strip()
-                if new_value:
-                    try:
-                        entry.delete(0, tk.END)
-                        entry.insert(0, new_value)
-                        out["roe_max_rps"] = new_value
-                    except Exception:
-                        pass
+            _via_var = self.__dict__.get("_scan_via_proxy_var")
+            out["scan_via_proxy"] = bool(_via_var.get()) if _via_var is not None else False
             entry = getattr(self, "_roe_block_checks_entry", None)
             if entry is not None:
                 out["roe_block_checks"] = (entry.get() or "").strip()
@@ -3316,13 +3317,9 @@ class App(tk.Tk):
             _vars["_roe_max_rps_var"].get() if "_roe_max_rps_var" in _vars else 0)
         delay_ms = self._parse_nonneg_float(
             _vars["_roe_delay_ms_var"].get() if "_roe_delay_ms_var" in _vars else 0)
-        if max_rps <= 0:
-            old_entry = getattr(self, "_roe_max_rps_entry", None)
-            if old_entry is not None:
-                try:
-                    max_rps = self._parse_nonneg_float(old_entry.get())
-                except Exception:
-                    pass
+        # Max RPS — только новое поле Advanced. Старое Settings→ROE
+        # «Max requests/sec» больше не влияет (иначе выставление 0 в новом
+        # поле незаметно оставляло лимит из старого).
         if min_rps > 0 and max_rps > 0 and min_rps > max_rps:
             min_rps = max_rps
         return min_rps, max_rps, delay_ms
@@ -3721,11 +3718,12 @@ class App(tk.Tk):
         _set_entry("_scope_allowlist_entry", settings.get("scope_allowlist", ""))
         _set_var("_scope_block_private_var",
                  bool(settings.get("scope_block_private", True)))
-        _old_max = str(settings.get("roe_max_rps", "0") or "0").strip() or "0"
-        _set_entry("_roe_max_rps_entry", _old_max)
         _set_var("_roe_min_rps_var", str(settings.get("min_rps", "0") or "0"))
-        _set_var("_roe_max_rps_var", str(settings.get("max_rps", _old_max) or _old_max))
+        # Старый roe_max_rps из settings.json больше не влияет на скан —
+        # единственный источник Max RPS — поле Advanced.
+        _set_var("_roe_max_rps_var", str(settings.get("max_rps", "0") or "0"))
         _set_var("_roe_delay_ms_var", str(settings.get("delay_ms", "0") or "0"))
+        _set_var("_scan_via_proxy_var", bool(settings.get("scan_via_proxy", False)))
         _set_entry("_roe_block_checks_entry",
                    settings.get("roe_block_checks",
                                 "file_upload,ssrf,xxe,deserialization"))
@@ -3764,7 +3762,7 @@ class App(tk.Tk):
         """FocusOut-автосохранение текстовых полей Settings tab."""
         for attr in (
             "_burp_browser_path", "_burp_browser_profile",
-            "_scope_allowlist_entry", "_roe_max_rps_entry", "_roe_block_checks_entry",
+            "_scope_allowlist_entry", "_roe_block_checks_entry",
         ):
             widget = getattr(self, attr, None)
             if widget is None:
@@ -5602,15 +5600,25 @@ class App(tk.Tk):
 
             self.log(f"[SCAN] {len(tasks)} tasks generated, starting {workers} workers …")
 
-            # Передаём proxy_url чтобы httpx тоже проксировал localhost-запросы
+            # По умолчанию скан идёт НАПРЯМУЮ (быстрее и не засоряет History
+            # трафиком сканера). Через прокси — только по явному чекбоксу.
             _proxy_url: Optional[str] = None
-            if self._proxy_runner and self._proxy_runner.is_running:
+            _scan_via_proxy = bool(getattr(
+                self, "_scan_via_proxy_var", tk.BooleanVar(value=False)
+            ).get())
+            if _scan_via_proxy and self._proxy_runner and self._proxy_runner.is_running:
                 host = self._proxy_host.get().strip() or "127.0.0.1"
                 try:
                     port = int(self._proxy_port.get())
                 except Exception:
                     port = 8080
                 _proxy_url = f"http://{host}:{port}"
+                self.log(
+                    f"[SCAN] Scan traffic → local proxy {host}:{port} "
+                    f"(медленнее; History будет содержать трафик скана)"
+                )
+            else:
+                self.log("[SCAN] Scan traffic → direct (без прокси)")
 
             scope_block_private = getattr(
                 self, "_scope_block_private_var", tk.BooleanVar(value=True)
@@ -5638,6 +5646,14 @@ class App(tk.Tk):
             except (TypeError, ValueError):
                 _runner_params = set()
             _min_rps, _max_rps, _delay_ms = self._rate_limit_values()
+            self._scan_started_wall = time.time()
+            if _min_rps or _max_rps or _delay_ms:
+                self.log(
+                    f"[SCAN] Rate limit: min={_min_rps:g}/s max={_max_rps:g}/s "
+                    f"delay={_delay_ms:g}ms"
+                )
+            else:
+                self.log("[SCAN] Rate limit: off (unlimited; actual speed depends on target/DB)")
             if "max_rps" in _runner_params:
                 _runner_kwargs["max_rps"] = float(_max_rps)
             if "min_rps" in _runner_params:
@@ -5746,6 +5762,32 @@ class App(tk.Tk):
         self._scan_finalized_generation = gen
         self._scan_generation = gen + 1
         runner = self._scan_runner
+        # Диагностика скорости/лимитера — чтобы было видно, применяются ли
+        # Min/Max RPS/Delay (и что реальная скорость упирается в цель/БД).
+        try:
+            elapsed = time.time() - float(getattr(self, "_scan_started_wall", 0) or 0)
+            total = int(getattr(runner, "_tasks_total", 0) or 0)
+            if elapsed > 0 and total > 0:
+                self.log(
+                    f"[SCAN] Speed: {total} tasks in {elapsed:.1f}s "
+                    f"({total / elapsed:.1f} tasks/s)"
+                )
+            lim = getattr(runner, "_rate_limiter", None)
+            if lim is not None:
+                if getattr(lim, "enabled", False):
+                    acquires = int(getattr(lim, "total_acquires", 0) or 0)
+                    waits = float(getattr(lim, "total_wait_s", 0) or 0)
+                    avg_int = (waits / max(1, acquires - 1)) if acquires > 1 else 0.0
+                    self.log(
+                        f"[SCAN] Rate limit applied: slots={acquires}, "
+                        f"total_wait={waits:.1f}s, avg_interval={avg_int:.3f}s"
+                    )
+                else:
+                    self.log(
+                        "[SCAN] Rate limit was off — скорость ограничена сетью/целью/БД"
+                    )
+        except Exception:
+            pass
         auth_failures = 0
         # engine-dev может назвать поле по-разному — поддерживаем варианты.
         for _auth_attr in ("auth_failure_count", "auth_failures", "unauth_count"):

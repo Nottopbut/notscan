@@ -816,7 +816,7 @@ def test_apply_settings_to_ui_after_project_switch(tmp_path):
         "proxy_idle_stop_min": 0,
         "scope_allowlist": "new.example",
         "scope_block_private": False,
-        "roe_max_rps": "5",
+        "max_rps": "5",
         "roe_block_checks": "sqli",
         "roe_stop_on_session_drift": False,
         "burp_browser_path": "/opt/chrome",
@@ -834,7 +834,8 @@ def test_apply_settings_to_ui_after_project_switch(tmp_path):
     assert app._proxy_idle_min_var.get() == "0"
     assert app._scope_allowlist_entry.get() == "new.example"
     assert app._scope_block_private_var.get() is False
-    assert app._roe_max_rps_entry.get() == "5"
+    # Max RPS — поле Advanced (старый Settings-виджет удалён).
+    assert app._roe_max_rps_var.get() == "5"
     assert app._roe_block_checks_entry.get() == "sqli"
     assert app._roe_stop_on_session_drift.get() is False
     assert app._burp_browser_path.get() == "/opt/chrome"
@@ -1925,6 +1926,7 @@ res = {
         hasattr(cfg, "_roe_max_rps_entry_new"),
         hasattr(cfg, "_roe_delay_ms_entry"),
     ],
+    "old_entry_removed": not hasattr(cfg, "_roe_max_rps_entry_old"),
     "values_default": list(app._rate_limit_values()),
 }
 app._roe_min_rps_var.set("2")
@@ -1939,18 +1941,16 @@ app.after(1500, app.quit)
 app.mainloop()
 res["captured"] = dict(captured)
 
-# Fallback: новое Max RPS пусто → используется старое ROE-поле Settings.
+# Новый Max RPS=0 → лимит выключен (старое Settings-поле больше не влияет).
 captured.clear()
 app._roe_max_rps_var.set("0")
 app._roe_min_rps_var.set("0")
 app._roe_delay_ms_var.set("0")
-app._roe_max_rps_entry.delete(0, "end")
-app._roe_max_rps_entry.insert(0, "7")
 app._scan_runner = None
 app.after(0, app._run_scan)
 app.after(1500, app.quit)
 app.mainloop()
-res["captured_fallback_old"] = dict(captured)
+res["captured_off"] = dict(captured)
 print("RESULT_JSON " + json.dumps(res, ensure_ascii=False))
 app._proxy_shutdown_done = True
 app.destroy()
@@ -2262,11 +2262,10 @@ def test_gui_rate_limit_min_max_delay_fields_and_runner_kwargs(tmp_path):
     assert captured["delay_ms"] == 100.0, captured
     assert "127.0.0.1" in (captured["scope_allowlist"] or []), captured
 
-    # Backward compat: если новое Max RPS пусто — берём старое ROE-поле.
-    fallback = data["captured_fallback_old"]
-    assert fallback["max_rps"] == 7.0, fallback
-    assert fallback["min_rps"] == 0.0
-    assert fallback["delay_ms"] == 0.0
+    # Новый Max RPS=0 → лимит выключен; старое Settings-поле не влияет.
+    off = data["captured_off"]
+    assert off["max_rps"] == 0.0 and off["min_rps"] == 0.0
+    assert off["delay_ms"] == 0.0
 
 
 @pytest.mark.integration
