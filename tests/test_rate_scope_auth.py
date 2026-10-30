@@ -378,9 +378,12 @@ def test_auth_failure_counters(status_server, tmp_db):
     )
     _run(runner)
     stats = runner.auth_stats()
-    assert runner.auth_failure_count == 3, stats
+    # 401+403 — реальные auth-failures; login-redirect считается отдельно
+    # (может быть нормальным поведением для мутированных URL).
+    assert runner.auth_failure_count == 2, stats
+    assert stats["auth_redirect_count"] == 1, stats
     assert runner.last_auth_status == 302, stats
-    assert any("[AUTH] 3 responses" in m for m in logs), logs
+    assert any("[AUTH] 2 responses with 401/403" in m for m in logs), logs
 
 
 # ══════════════════════════════════════════════════════════════════

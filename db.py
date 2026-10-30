@@ -44,6 +44,12 @@ def _create_conn() -> tuple[sqlite3.Connection, _ConnHolder]:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    # 10 параллельных воркеров пишут результаты одновременно — ждём блокировку
+    # до 30с вместо дефолтных 5с (иначе "database is locked" и потеря задач).
+    try:
+        conn.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        pass
     holder = _ConnHolder(conn)
     with _conn_lock:
         # заодно подчищаем записи о соединениях завершившихся потоков

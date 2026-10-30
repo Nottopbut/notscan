@@ -1297,9 +1297,14 @@ def payload_check_ids() -> list[str]:
             cid = str(_def_attr(d, "check_id", ""))
             if cid and _def_attr(d, "payload_file", None):
                 ids.append(cid)
+    # Legacy payload-ids: не добавляем те, что в каталоге помечены как
+    # passive/probe (например idor/file_upload): их бейджи относятся к
+    # пассивным проверкам и не должны запускать payload-скан.
+    _non_payload_kinds = set(passive_check_ids()) | set(probe_check_ids())
     for cid in _LEGACY_PAYLOAD_CHECK_IDS:
-        if cid not in ids:
-            ids.append(cid)
+        if cid in ids or cid in _non_payload_kinds:
+            continue
+        ids.append(cid)
     return ids
 
 
@@ -2182,6 +2187,8 @@ class App(tk.Tk):
         self._restart_thread: Optional[threading.Thread] = None
         self._proxy_shutdown_done = False
         self._scan_runner: Optional[scanner_core.ScannerRunner] = None
+        self._scan_generation = 0
+        self._scan_finalized_generation = -1
         # Фоновый поток построения/запуска задач и вспомогательные потоки скана
         # (passive-проверки, info-disclosure probe) — нужны guard'у смены проекта.
         self._scan_thread: Optional[threading.Thread] = None
@@ -3422,13 +3429,74 @@ class App(tk.Tk):
         except Exception as exc:
             self.log(f"[IMPORT][WARN] probe auth headers: {exc}")
 
+    def _find_history_login_record(self, candidate: dict):
+        """Находит импортированную history-запись, соответствующую login-candidate."""
+        try:
+            want_method = str(candidate.get("method") or "POST").upper()
+            want_url = str(candidate.get("url") or "")
+            if not want_url:
+                return None
+            rows = db.fetch_history(limit=5000)
+            for rec in rows:
+                if str(rec.get("method") or "").upper() != want_method:
+                    continue
+                if str(rec.get("url") or "") == want_url:
+                    return rec
+            # fallback: match по пути/первым 120 символам URL
+            for rec in rows:
+                if str(rec.get("method") or "").upper() != want_method:
+                    continue
+                if str(rec.get("url") or "")[:120] == want_url[:120]:
+                    return rec
+        except Exception:
+            return None
+        return None
+
     def _setup_autologin_from_postman(self, candidate: dict) -> bool:
-        """Создать SessionManager/AuthConfig из login-candidate Postman."""
+        """Создать SessionManager/AuthConfig из login-candidate Postman.
+
+        Если среди импортированных записей есть сам login-запрос — активируем
+        его через Auth tab (шаблон + первый login + индикатор ACTIVE), чтобы
+        пользователь видел ручку авторизации во вкладке Auth, а не только в логе.
+        """
         try:
             from session_manager import AuthConfig, SessionManager
         except Exception as exc:
             self.log(f"[AUTH][WARN] session_manager недоступен: {exc}")
             return False
+        # 1) Если login-запрос уже импортирован в History — активируем через
+        #    Auth tab (видимый шаблон, дерево login-запросов, ACTIVE-статус,
+        #    первый login в фоне). Это исправляет «ручка есть, но в Auth пусто».
+        rec = self._find_history_login_record(candidate)
+        activator = getattr(self, "_activate_login_record", None)
+        if rec is not None and callable(activator):
+            try:
+                if activator(rec, save=True):
+                    try:
+                        reload_login = getattr(self, "_reload_login_requests", None)
+                        if callable(reload_login):
+                            reload_login()
+                        select_login = getattr(self, "_select_login_record", None)
+                        if callable(select_login):
+                            select_login(str(candidate.get("url") or ""),
+                                         str(candidate.get("method") or "POST"))
+                    except Exception:
+                        pass
+                    try:
+                        refresh = getattr(self, "_refresh_session_view", None)
+                        if callable(refresh):
+                            refresh()
+                    except Exception:
+                        pass
+                    self.log(
+                        f"[AUTH] Auto-login activated in Auth tab: "
+                        f"{candidate.get('method')} {candidate.get('url')}"
+                    )
+                    return True
+            except Exception as exc:
+                self.log(f"[AUTH][WARN] Auth-tab activation failed: {exc}")
+
+        # 2) Fallback: создать SessionManager напрямую (если history-записи нет).
         try:
             max_rel = 3
             try:
@@ -3456,6 +3524,18 @@ class App(tk.Tk):
             try:
                 self._settings["postman_autologin_url"] = cfg.login_url
                 self._save_proxy_settings()
+            except Exception:
+                pass
+            try:
+                reload_login = getattr(self, "_reload_login_requests", None)
+                if callable(reload_login):
+                    reload_login()
+                select_login = getattr(self, "_select_login_record", None)
+                if callable(select_login):
+                    select_login(cfg.login_url, cfg.method)
+                refresh = getattr(self, "_refresh_session_view", None)
+                if callable(refresh):
+                    refresh()
             except Exception:
                 pass
             self.log(
@@ -5172,6 +5252,8 @@ class App(tk.Tk):
             return
 
         history_ids = list(self._scan_list.keys())
+        self._scan_generation = int(getattr(self, "_scan_generation", 0)) + 1
+        _scan_gen = self._scan_generation
 
         # ── Payload-file checks (legacy scanner_core) ──────────────────────────
         enabled_checks = []
@@ -5490,6 +5572,32 @@ class App(tk.Tk):
                     self.log("  • мутации Query/JSON/Form включены?")
                     self.log("  • тело запроса не пустое (смотри диагностику выше)?")
                     self.after(0, self._scan_finished)
+                    return
+                # Нет payload-задач, но запущены passive/probe-потоки: скан
+                # должен финализироваться ПОСЛЕ их завершения, иначе GUI
+                # навсегда ждёт Stop Scan (баг «9 запросов и повис»).
+                self.log(
+                    f"[SCAN] No payload tasks; waiting for auxiliary checks "
+                    f"(passive={bool(active_passive)}, probe={bool(run_infodisc)})"
+                )
+
+                def _wait_aux_then_finish() -> None:
+                    try:
+                        threads = list(getattr(self, "_aux_scan_threads", []))
+                        for t in threads:
+                            if t.is_alive():
+                                t.join()
+                    except Exception:
+                        pass
+                    # Если пользователь успел нажать Stop/открыл другой скан —
+                    # generation не совпадёт, повторно не финализируем.
+                    if int(getattr(self, "_scan_generation", 0)) == _scan_gen:
+                        self.after(0, self._scan_finished)
+
+                threading.Thread(
+                    target=_wait_aux_then_finish, daemon=True,
+                    name="scan-aux-waiter",
+                ).start()
                 return
 
             self.log(f"[SCAN] {len(tasks)} tasks generated, starting {workers} workers …")
@@ -5548,27 +5656,65 @@ class App(tk.Tk):
             self.after(0, lambda: self._btn_run_scan.configure(state=tk.DISABLED))
             self.after(0, lambda: self._btn_stop_scan.configure(state=tk.NORMAL))
 
-            # Poll progress
+            # Poll progress (защищён: любое исключение не убивает цепочку)
             def _poll():
                 runner = self._scan_runner
                 if runner is None:
                     return
-                remaining = runner.tasks_remaining
-                total = len(tasks)
-                done = total - remaining
-                self.after(0, lambda: self._scan_progress.configure(
-                    text=i18n.tr("{done}/{total} tasks", done=done, total=total)
-                ))
-                if remaining > 0 and not runner._stop.is_set():
-                    threading.Timer(1.0, _poll).start()
-                elif not runner._stop.is_set():
-                    self.after(0, self._scan_finished)
-                # else: идёт остановка — финализацию сделает _stop_scan
+                try:
+                    remaining = runner.tasks_remaining
+                    total = len(tasks)
+                    done = total - remaining
+                    self.after(0, lambda: self._scan_progress.configure(
+                        text=i18n.tr("{done}/{total} tasks", done=done, total=total)
+                    ))
+                    if remaining <= 0 and not runner._stop.is_set():
+                        self.after(0, self._scan_finished)
+                        return
+                except Exception as exc:
+                    try:
+                        self.log(f"[SCAN][WARN] progress poll: {exc}")
+                    except Exception:
+                        pass
+                # Продолжаем опрос, пока runner жив (а не полагаемся на чудо).
+                try:
+                    if getattr(self, "_scan_runner", None) is runner and not runner._stop.is_set():
+                        threading.Timer(1.0, _poll).start()
+                except Exception:
+                    pass
 
+            # Независимый watchdog завершит скан даже при сбое _poll.
+            self._start_scan_completion_watcher(self._scan_runner)
             _poll()
 
         self._scan_thread = threading.Thread(target=_build_and_run, daemon=True)
         self._scan_thread.start()
+
+    def _start_scan_completion_watcher(self, runner) -> None:
+        """Независимый watchdog: финализирует скан, даже если GUI _poll умер.
+
+        Раньше исключение в цепочке threading.Timer(_poll) навсегда оставляло
+        скан «висящим»: progress замирал на N задачах, а пользователь жал
+        Stop Scan, чтобы разблокировать GUI.
+        """
+
+        def _watch() -> None:
+            while True:
+                try:
+                    if getattr(self, "_scan_runner", None) is not runner:
+                        return
+                    if runner._stop.is_set():
+                        return
+                    if runner.tasks_remaining <= 0:
+                        self.after(0, self._scan_finished)
+                        return
+                except Exception:
+                    return
+                time.sleep(0.5)
+
+        threading.Thread(
+            target=_watch, daemon=True, name="scan-completion-watcher"
+        ).start()
 
     def _stop_scan(self) -> None:
         runner = self._scan_runner
@@ -5593,6 +5739,12 @@ class App(tk.Tk):
     def _scan_finished(self) -> None:
         # Скан завершён/остановлен: сбрасываем runner, иначе guard смены проекта
         # остался бы заблокированным (после Stop tasks_remaining может быть > 0).
+        gen = int(getattr(self, "_scan_generation", 0))
+        if getattr(self, "_scan_finalized_generation", -1) == gen:
+            # poll/watchdog/aux-waiter могли одновременно вызвать финализацию.
+            return
+        self._scan_finalized_generation = gen
+        self._scan_generation = gen + 1
         runner = self._scan_runner
         auth_failures = 0
         # engine-dev может назвать поле по-разному — поддерживаем варианты.
@@ -6084,8 +6236,11 @@ def _patch_app_with_auth_and_revshell(app: "App") -> None:
             if rec["method"] not in ("POST", "PUT"):
                 continue
             status = rec.get("resp_status") or 0
-            if status not in LOGIN_SUCCESS_CODES and status not in (400, 401, 422):
-                # include 400/422 too — sometimes login fails with bad creds
+            # Импортированные из Postman/HAR/raw-HTTP запросы приходят без
+            # ответа (resp_status=None) — их login-кандидатов нельзя терять:
+            # иначе «ручка авторизации» не появляется в Auth tab и авто-логин
+            # выглядит неработающим. Для status==0 проверим только креды ниже.
+            if status and status not in LOGIN_SUCCESS_CODES and status not in (400, 401, 422):
                 continue
             body = rec.get("req_body") or b""
             if not body:
@@ -6343,7 +6498,37 @@ def _patch_app_with_auth_and_revshell(app: "App") -> None:
         app.log("[AUTH] Session cleared")
         app.after(0, _refresh_session_view)
 
+    def _select_login_record(url: str, method: str = "") -> None:
+        """Выделяет login-запрос в Auth tab по URL/методу (для Postman auto-login)."""
+        try:
+            want = str(url or "")[:80]
+            want_method = str(method or "").upper()
+            for iid in _login_tree.get_children():
+                vals = _login_tree.item(iid, "values")
+                if not vals or len(vals) < 4:
+                    continue
+                row_url = str(vals[3] or "")
+                row_method = str(vals[2] or "").upper()
+                if want and row_url.startswith(want[:60]) and (
+                    not want_method or row_method == want_method
+                ):
+                    _login_tree.selection_set(iid)
+                    _login_tree.see(iid)
+                    try:
+                        _on_login_select()
+                    except Exception:
+                        pass
+                    break
+        except Exception:
+            pass
+
     app._refresh_session_view = _refresh_session_view
+    app._reload_login_requests = _reload_login_requests
+    # Для диагностики/тестов: дерево login-кандидатов и label шаблона.
+    app._login_tree = _login_tree
+    app._auth_template_lbl = _tpl_lbl
+    app._activate_login_record = _activate_login_record
+    app._select_login_record = _select_login_record
 
     # Expose for worker auto-relogin log
     def _poll_session():

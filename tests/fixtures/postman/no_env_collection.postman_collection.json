@@ -1,0 +1,79 @@
+{
+  "info": {
+    "name": "Notscan demo — no environment required",
+    "description": "Коллекция для проверки импорта БЕЗ env-файла: все URL/заголовки/тела уже литеральные.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "bWAPP login page",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://127.0.0.1:8081/login.php"
+        }
+      }
+    },
+    {
+      "name": "bWAPP login (bee/bug)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/x-www-form-urlencoded"
+          },
+          {
+            "key": "Referer",
+            "value": "http://127.0.0.1:8081/login.php"
+          }
+        ],
+        "url": {
+          "raw": "http://127.0.0.1:8081/login.php"
+        },
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            {
+              "key": "login",
+              "value": "bee"
+            },
+            {
+              "key": "password",
+              "value": "bug"
+            },
+            {
+              "key": "security_level",
+              "value": "0"
+            },
+            {
+              "key": "form",
+              "value": "submit"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "bWAPP portal",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://127.0.0.1:8081/portal.php"
+        }
+      }
+    },
+    {
+      "name": "bWAPP SQLi search",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://127.0.0.1:8081/sqli_1.php?title=iron+man&action=search"
+        }
+      }
+    }
+  ]
+}

@@ -1898,6 +1898,32 @@ def _build_async_client(proxy_url: Optional[str]) -> httpx.AsyncClient:
     return httpx.AsyncClient(**kwargs)
 
 
+def _merge_cookie_headers(existing: str, fresh: str) -> str:
+    """Объединяет Cookie: свежие session-cookies перетирают одноимённые старые.
+
+    Простое склеивание "old; new" оставляло ДУБЛИ PHPSESSID/JSESSIONID: сервер
+    брал первый (устаревший) — и каждый запрос скана получал 302/relogin-шторм.
+    """
+    merged: dict[str, str] = {}
+    for chunk in (existing or "").split(";"):
+        chunk = chunk.strip()
+        if not chunk or "=" not in chunk:
+            continue
+        name, _sep, value = chunk.partition("=")
+        name = name.strip()
+        if name:
+            merged[name] = value.strip()
+    for chunk in (fresh or "").split(";"):
+        chunk = chunk.strip()
+        if not chunk or "=" not in chunk:
+            continue
+        name, _sep, value = chunk.partition("=")
+        name = name.strip()
+        if name:
+            merged[name] = value.strip()
+    return "; ".join(f"{k}={v}" for k, v in merged.items())
+
+
 def _merge_session_headers(
     task_headers: dict, session_headers: Optional[dict]
 ) -> dict:
@@ -1906,8 +1932,9 @@ def _merge_session_headers(
     if session_headers:
         for k, v in session_headers.items():
             if v and k.lower() not in ("content-length",):
-                if k.lower() == "cookie" and headers.get("Cookie"):
-                    headers["Cookie"] = (headers["Cookie"] + "; " + v).strip("; ")
+                if k.lower() == "cookie":
+                    old_cookie = headers.get("Cookie", headers.get("cookie", ""))
+                    headers["Cookie"] = _merge_cookie_headers(old_cookie, str(v))
                 else:
                     headers[k] = v
     return headers
@@ -1929,14 +1956,23 @@ def _is_auth_error_response(
     resp_text: str,
 ) -> bool:
     """Session-drift эвристика из старого _worker (401/403/redirect на login)."""
+    if status_code in (401, 403):
+        return True
     loc = ""
     if response_headers:
         loc = response_headers.get("Location", "") or response_headers.get("location", "")
-    return bool(
-        status_code in (401, 403)
-        or (loc and "login" in loc.lower())
-        or ("login" in resp_text.lower() and status_code in (200, 302, 303))
-    )
+    loc_low = str(loc).lower()
+    if loc_low and any(
+        marker in loc_low for marker in
+        ("login", "signin", "sign-in", "signon", "sso", "auth/")
+    ):
+        return True
+    # Login-страница: только форма с password, а НЕ любое слово "login" в теле
+    # (иначе каждая страница bWAPP с меню/ссылкой Login вызывала relogin-шторм).
+    text = (resp_text or "").lower()
+    if ("type=\"password\"" in text or "type='password'" in text) and "<form" in text:
+        return True
+    return False
 
 
 def _relogin_and_get_headers(
@@ -1961,6 +1997,35 @@ def _relogin_and_get_headers(
     relogin_count = getattr(session_manager, "_relogin_count", 0)
 
     if auth_enabled and relogin_count < max_attempts:
+        # Cooldown: при массовых 401/302 не устраиваем «шторм» логинов из всех
+        # воркеров — один login на 3 секунды, остальные переиспользуют cookies.
+        now = time.time()
+        try:
+            last_attempt = float(getattr(session_manager, "_last_relogin_attempt", 0.0) or 0.0)
+        except Exception:
+            last_attempt = 0.0
+        if now - last_attempt < 3.0:
+            store = getattr(session_manager, "token_store", None)
+            new_headers = {}
+            if store is not None:
+                if getattr(store, "access_token", None):
+                    auth_obj = getattr(session_manager, "auth", None)
+                    new_headers[
+                        getattr(auth_obj, "token_header_name", "Authorization")
+                    ] = (
+                        getattr(auth_obj, "token_prefix", "Bearer ")
+                        + str(store.access_token)
+                    ).strip()
+                if getattr(store, "cookies", None):
+                    new_headers["Cookie"] = "; ".join(
+                        f"{k}={v}" for k, v in store.cookies.items()
+                    )
+            if new_headers:
+                return new_headers
+        try:
+            session_manager._last_relogin_attempt = now  # noqa: SLF001
+        except Exception:
+            pass
         # Сразу увеличиваем счётчик попыток, иначе каждый 401 в воркере снова
         # дёргал бы login() бесконечно. Успешный login() сам сбрасывает его в 0.
         try:
@@ -2214,6 +2279,7 @@ class ScannerRunner:
         # ── Auth preflight counters (GUI предупреждает после скана) ──
         self._auth_lock = threading.Lock()
         self.auth_failure_count = 0
+        self.auth_redirect_count = 0
         self.last_auth_status: Optional[int] = None
         self._tasks_total = len(tasks)
         self._completed = 0
@@ -2363,17 +2429,24 @@ class ScannerRunner:
         if status_code is None:
             return
         auth_failure = status_code in (401, 403)
+        is_login_redirect = False
         if not auth_failure and 300 <= int(status_code) < 400 and response_headers:
             location = (
                 response_headers.get("Location")
                 or response_headers.get("location")
                 or ""
             )
-            auth_failure = "login" in str(location).lower()
-        if not auth_failure:
+            is_login_redirect = "login" in str(location).lower()
+        if not auth_failure and not is_login_redirect:
             return
         with self._auth_lock:
-            self.auth_failure_count += 1
+            # 401/403 — реальные признаки отсутствия авторизации. Редирект на
+            # login часто просто поведение конкретного мутированного URL
+            # (path-мутация) и не должен пугать пользователя.
+            if auth_failure:
+                self.auth_failure_count += 1
+            else:
+                self.auth_redirect_count += 1
             self.last_auth_status = int(status_code)
 
     def auth_stats(self) -> dict:
@@ -2381,6 +2454,7 @@ class ScannerRunner:
         with self._auth_lock:
             return {
                 "auth_failure_count": self.auth_failure_count,
+                "auth_redirect_count": self.auth_redirect_count,
                 "last_auth_status": self.last_auth_status,
             }
 
@@ -2388,9 +2462,14 @@ class ScannerRunner:
         stats = self.auth_stats()
         if stats["auth_failure_count"]:
             self.log_cb(
-                f"[AUTH] {stats['auth_failure_count']} responses with 401/403/"
-                f"login-redirect during scan (last status="
-                f"{stats['last_auth_status']}) — проверь Cookie/OTP/авто-логин"
+                f"[AUTH] {stats['auth_failure_count']} responses with 401/403 "
+                f"(last status={stats['last_auth_status']}) — проверь "
+                f"Cookie/OTP/авто-логин"
+            )
+        elif stats.get("auth_redirect_count"):
+            self.log_cb(
+                f"[AUTH] {stats['auth_redirect_count']} login-redirects during scan "
+                f"(informational; часто это поведение мутированных URL)"
             )
 
     def _login_session(self) -> Optional[dict]:

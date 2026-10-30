@@ -1,0 +1,100 @@
+{
+  "info": {
+    "name": "Notscan demo — REQUIRES Postman environment",
+    "description": "Коллекция использует {{baseUrl}}, {{username}}, {{password}}, {{sessionCookie}}, {{searchTerm}} — нужен файл with_env.postman_environment.json.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "searchTerm",
+      "value": "iron man"
+    }
+  ],
+  "item": [
+    {
+      "name": "portal (needs {{baseUrl}} + {{sessionCookie}})",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "{{sessionCookie}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/portal.php"
+        }
+      }
+    },
+    {
+      "name": "login (needs {{baseUrl}}, {{username}}, {{password}})",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/x-www-form-urlencoded"
+          },
+          {
+            "key": "Referer",
+            "value": "{{baseUrl}}/login.php"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/login.php"
+        },
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            {
+              "key": "login",
+              "value": "{{username}}"
+            },
+            {
+              "key": "password",
+              "value": "{{password}}"
+            },
+            {
+              "key": "security_level",
+              "value": "0"
+            },
+            {
+              "key": "form",
+              "value": "submit"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "SQLi search (needs {{baseUrl}}, collection var {{searchTerm}})",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "{{sessionCookie}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/sqli_1.php?title={{searchTerm}}&action=search"
+        }
+      }
+    },
+    {
+      "name": "hostheader (needs {{baseUrl}})",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "{{sessionCookie}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/hostheader_1.php"
+        }
+      }
+    }
+  ]
+}

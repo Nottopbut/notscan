@@ -320,12 +320,18 @@ class SessionManager:
         if otp_code:
             body[self.auth.otp_field] = otp_code
 
+        # follow_redirects=False: login-эндпоинты часто отвечают 302/303 и
+        # ставят session-cookie именно в redirect-ответе. При автоматическом
+        # следовании httpx терял Set-Cookie промежуточного ответа → сессия
+        # оставалась пустой, каждый скан-запрос считался «не авторизован» и
+        # запускал лавину relogin (скан «висел» после нескольких запросов).
         if self.auth.content_type == "json":
             resp = self._client.request(
                 method=self.auth.method,
                 url=self.auth.login_url,
                 json=body,
                 headers=headers,
+                follow_redirects=False,
             )
         elif self.auth.content_type == "form":
             resp = self._client.request(
@@ -333,6 +339,7 @@ class SessionManager:
                 url=self.auth.login_url,
                 data=body,
                 headers=headers,
+                follow_redirects=False,
             )
         else:  # raw
             raw_body = str(body.get("raw", ""))
@@ -349,6 +356,7 @@ class SessionManager:
                 url=self.auth.login_url,
                 content=raw_body.encode() if isinstance(raw_body, str) else raw_body,
                 headers=headers,
+                follow_redirects=False,
             )
         return resp
 

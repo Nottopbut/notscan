@@ -74,6 +74,13 @@ and reports.
   Postman environment/globals file (**⬆ Import environment**), resolves collection
   variables + environment values in URLs/headers/bodies and only then imports. The env is
   kept in memory for the session (values are not logged).
+- **Reliable scans and Postman auth** — imported login requests (with no response) are
+  now listed in the **Auth tab**; auto-login pre-fills the template and performs login.
+  Cookies from `302 + Set-Cookie` are captured correctly, stale collection cookies are
+  overridden by fresh session cookies (no duplicate `PHPSESSID`), and relogin has a
+  cooldown instead of a storm. The GUI scan has an independent completion watchdog, so it
+  finalizes itself even if the progress-poll chain fails — no need to press “Stop Scan”.
+  401/403 warnings are separated from informational login redirects.
 - **Rate limiting** — next to Workers in Advanced: **Min RPS**, **Max RPS** and
   **Delay (ms)**. Min+Max produce random pacing between 1/max and 1/min; Delay is a
   fixed pause; 0 disables the limit. A global async rate limiter is used (sqli_blind
@@ -170,7 +177,7 @@ make smoke    # headless GUI smoke test in xvfb on a temp copy of the project
 The repository ships a self-contained HTTP lab (`tests/lab/`) with intentionally vulnerable
 endpoints (reflected XSS, escaped reflection, SQL errors, redirects, delayed responses,
 CSRF-protected form, JSON API, cookie/CORS/SSRF/SSI cases, sensitive files/metafiles) used
-by 560 unit and integration tests. Proxy-lifecycle integration tests are skipped
+by 573 unit and integration tests. Proxy-lifecycle integration tests are skipped
 automatically when mitmproxy or a display is unavailable.
 
 ## Project structure
