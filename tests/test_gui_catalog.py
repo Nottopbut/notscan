@@ -1103,6 +1103,11 @@ import json, sys
 sys.path.insert(0, ".")
 import notscan
 import scanner_core
+import net_probe
+# Liveness-проверка не нужна в этих сценариях: считаем все цели живыми.
+net_probe.filter_alive_history_ids = (
+    lambda ids, timeout=3.0, log_cb=None: (list(ids), {})
+)
 import path_probe
 import db
 
@@ -1594,6 +1599,11 @@ import json, sys
 sys.path.insert(0, ".")
 import notscan
 import scanner_core
+import net_probe
+# Liveness-проверка не нужна в этих сценариях: считаем все цели живыми.
+net_probe.filter_alive_history_ids = (
+    lambda ids, timeout=3.0, log_cb=None: (list(ids), {})
+)
 import db
 
 captured = []
@@ -1871,6 +1881,11 @@ import json, sys, threading
 sys.path.insert(0, ".")
 import notscan
 import scanner_core
+import net_probe
+# Liveness-проверка не нужна в этих сценариях: считаем все цели живыми.
+net_probe.filter_alive_history_ids = (
+    lambda ids, timeout=3.0, log_cb=None: (list(ids), {})
+)
 import db
 
 captured = {}
@@ -1962,6 +1977,11 @@ import json, sys, threading
 sys.path.insert(0, ".")
 import notscan
 import scanner_core
+import net_probe
+# Liveness-проверка не нужна в этих сценариях: считаем все цели живыми.
+net_probe.filter_alive_history_ids = (
+    lambda ids, timeout=3.0, log_cb=None: (list(ids), {})
+)
 import db
 
 captured = []

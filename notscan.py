@@ -2091,6 +2091,8 @@ class SessionPickerWindow(tk.Toplevel):
         btns.pack(fill=tk.X, padx=8, pady=(0, 10))
         ttk.Button(btns, text="Open", style="Success.TButton", command=self._open_selected).pack(side=tk.RIGHT)
         ttk.Button(btns, text="Close", command=self.destroy).pack(side=tk.RIGHT, padx=6)
+        ttk.Button(btns, text=f"✎ {i18n.tr('Rename')}",
+                   command=self._rename_selected).pack(side=tk.RIGHT, padx=6)
 
     def _counts(self, proj: Path) -> tuple[int, int]:
         """(history_rows, results_rows) для проекта, без блокировки (read-only)."""
@@ -2135,6 +2137,51 @@ class SessionPickerWindow(tk.Toplevel):
         if current is not None and str(current) in self._proj_by_iid:
             self._tree.selection_set(str(current))
             self._tree.focus(str(current))
+
+    def _rename_selected(self) -> None:
+        """Rename выбранной сессии/проекта (в т.ч. не текущей)."""
+        sel = self._tree.selection()
+        if not sel:
+            return
+        proj = self._proj_by_iid.get(sel[0])
+        if proj is None:
+            return
+        proj = Path(proj)
+        current = getattr(self._app, "_project_dir", None)
+        is_current = current is not None and Path(current) == proj
+        if is_current and self._app._scan_in_progress():
+            self._app._warn_scan_in_progress()
+            return
+        from tkinter import simpledialog
+        new_name = simpledialog.askstring(
+            i18n.tr("Rename Project"),
+            i18n.tr("New name:"),
+            initialvalue=proj.name,
+            parent=self,
+        )
+        if new_name is None:
+            return
+        new_name = str(new_name).strip()
+        if not new_name or new_name == proj.name:
+            return
+        try:
+            if is_current:
+                # Безопасный путь через App: закроет БД-соединения, обновит
+                # db path / title / History / Results.
+                if not self._app._rename_project(new_name=new_name):
+                    self.refresh()
+                    return
+            else:
+                new_proj = self._app._rename_project_dir(proj, new_name)
+                self._app.log(f"[PROJECT] Renamed session {proj.name} → {Path(new_proj).name}")
+        except Exception as exc:
+            mb.showerror(
+                i18n.tr("Rename Project"),
+                i18n.tr("Could not rename project: {error}", error=exc),
+            )
+            self.refresh()
+            return
+        self.refresh()
 
     def _open_selected(self) -> None:
         sel = self._tree.selection()
@@ -2326,6 +2373,9 @@ class App(tk.Tk):
         proj_menu.add_command(label="Sessions / Projects...", command=self._open_session_picker)
         proj_menu.add_command(label="New Project", command=self._new_project)
         proj_menu.add_command(label="Open Project...", command=self._open_project)
+        proj_menu.add_command(
+            label="Rename Project…", command=lambda: self._rename_project(),
+        )
         proj_menu.add_separator()
         proj_menu.add_command(label="Open Project Folder", command=self._open_project_folder)
         menubar.add_cascade(label="Project", menu=proj_menu)
@@ -2460,6 +2510,105 @@ class App(tk.Tk):
         self._refresh_scanlist()
         self._refresh_results()
         self.log(f"[PROJECT] Switched to {proj_dir.name}")
+
+    @staticmethod
+    def _fallback_rename_project(proj_dir, new_name) -> Path:
+        """Fallback rename (если project_manager.rename_project ещё не смержен)."""
+        proj_dir = Path(proj_dir)
+        name = str(new_name or "").strip()
+        if not name:
+            raise ValueError("empty project name")
+        import re as _re
+        safe = _re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .")
+        if not safe:
+            raise ValueError(f"invalid project name: {name!r}")
+        target = proj_dir.parent / safe
+        if target.resolve() == proj_dir.resolve():
+            return proj_dir
+        if target.exists():
+            raise ValueError(f"project already exists: {safe}")
+        proj_dir.rename(target)
+        return target
+
+    def _rename_project_dir(self, proj_dir, new_name) -> Path:
+        """Переименовать папку проекта: API project_manager или fallback."""
+        try:
+            import project_manager as _pm
+            fn = getattr(_pm, "rename_project", None)
+            if callable(fn):
+                return Path(fn(Path(proj_dir), new_name))
+        except ValueError:
+            raise
+        except Exception:
+            # API ещё нет (до мержа) — используем локальный fallback.
+            pass
+        return self._fallback_rename_project(proj_dir, new_name)
+
+    def _rename_project(self, new_name=None) -> bool:
+        """Переименовать ТЕКУЩИЙ проект (меню Project / SessionPicker)."""
+        if self._scan_in_progress():
+            self._warn_scan_in_progress()
+            return False
+        old_dir = Path(getattr(self, "_project_dir", Path(".")))
+        if new_name is None:
+            from tkinter import simpledialog
+            new_name = simpledialog.askstring(
+                i18n.tr("Rename Project"),
+                i18n.tr("New name:"),
+                initialvalue=old_dir.name,
+            )
+        if new_name is None:
+            return False
+        new_name = str(new_name).strip()
+        if not new_name or new_name == old_dir.name:
+            return False
+        # Закрыть соединения БД до rename (иначе на Windows/открытых fd ошибки).
+        close_fn = getattr(db, "close_all_connections", None)
+        if not callable(close_fn):
+            close_fn = getattr(db, "_close_all_conns", None)
+        if callable(close_fn):
+            try:
+                close_fn()
+            except Exception:
+                pass
+        try:
+            new_dir = Path(self._rename_project_dir(old_dir, new_name))
+        except Exception as exc:
+            mb.showerror(
+                i18n.tr("Rename Project"),
+                i18n.tr("Could not rename project: {error}", error=exc),
+            )
+            try:
+                db.set_db_path(old_dir / "history.db")
+            except Exception:
+                pass
+            self._project_dir = old_dir
+            self._update_project_title()
+            return False
+        self._project_dir = new_dir
+        try:
+            db.set_db_path(new_dir / "history.db")
+        except Exception as exc:
+            self.log(f"[PROJECT][WARN] db path after rename: {exc}")
+        try:
+            self._settings = ui_theme.load_settings(new_dir)
+            ui_theme.save_settings(new_dir, self._settings)
+        except Exception:
+            pass
+        try:
+            self._apply_settings_to_ui()
+        except Exception:
+            pass
+        self._scan_list.clear()
+        self._update_project_title()
+        try:
+            self._refresh_history()
+            self._refresh_scanlist()
+            self._refresh_results()
+        except Exception:
+            pass
+        self.log(f"[PROJECT] Renamed {old_dir.name} → {new_dir.name}")
+        return True
 
     def _new_project(self) -> None:
         if self._scan_in_progress():
@@ -3560,6 +3709,27 @@ class App(tk.Tk):
             if "<form" in text:
                 return True
         return False
+
+    def _filter_alive_history_ids(self, history_ids):
+        """Liveness перед сканом: живы ли хосты целей.
+
+        Returns (alive_ids, host_details, checked). Если net_probe ещё не
+        смержен/ошибка — считаем всех живыми (не блокируем скан).
+        """
+        try:
+            import net_probe
+            fn = getattr(net_probe, "filter_alive_history_ids", None)
+            if callable(fn):
+                # GUI сам логирует [ALIVE]-строки (без дублей из net_probe).
+                alive, details = fn(history_ids, timeout=3.0, log_cb=None)
+                return (
+                    [int(x) for x in (alive or [])],
+                    dict(details or {}),
+                    True,
+                )
+        except Exception as exc:
+            self.log(f"[ALIVE][WARN] liveness check failed: {exc}")
+        return list(history_ids), {}, False
 
     def _ask_yesno_threadsafe(self, title: str, message: str, timeout: float = 120.0) -> bool:
         """mb.askyesno из фонового потока: очередь → GUI-поток → результат."""
@@ -5364,13 +5534,60 @@ class App(tk.Tk):
 
         # Build tasks in background to avoid freezing GUI
         def _build_and_run():
+            # A: liveness-проверка хостов ДО каких-либо сканирующих запросов.
+            alive_ids, host_details, liveness_checked = (
+                self._filter_alive_history_ids(history_ids)
+            )
+            dead_hosts = []
+            if liveness_checked:
+                for host, info in host_details.items():
+                    try:
+                        ok, detail = info
+                    except Exception:
+                        ok, detail = bool(info), ""
+                    self.log(
+                        f"[ALIVE] {host} — {'OK' if ok else 'DEAD'} "
+                        f"({detail})"
+                    )
+                    if not ok:
+                        dead_hosts.append(str(host))
+            active_ids = list(history_ids)
+            if liveness_checked and dead_hosts:
+                dead_list = ", ".join(dead_hosts)
+                if not alive_ids:
+                    self.log(
+                        f"[ALIVE] No alive targets ({dead_list}) — scan aborted"
+                    )
+                    self.after(0, lambda: mb.showwarning(
+                        i18n.tr("Scan"),
+                        i18n.tr(
+                            "Hosts unavailable and skipped: {hosts}. "
+                            "Scan cancelled.",
+                            hosts=dead_list,
+                        ),
+                    ))
+                    self.after(0, self._scan_finished)
+                    return
+                self.log(
+                    f"[ALIVE] Skipping dead hosts: {dead_list}; "
+                    f"alive ids: {alive_ids}"
+                )
+                self.after(0, lambda: mb.showwarning(
+                    i18n.tr("Scan"),
+                    i18n.tr(
+                        "Hosts unavailable and skipped: {hosts}",
+                        hosts=dead_list,
+                    ),
+                ))
+                active_ids = list(alive_ids)
+
             # C: preflight авторизации (не блокирует при сетевой ошибке/пустом списке).
-            if not self._preflight_auth(history_ids):
+            if not self._preflight_auth(active_ids):
                 self.log("[SCAN] Cancelled after auth preflight warning")
                 self.after(0, self._scan_finished)
                 return
             # Диагностика тела запросов перед построением задач
-            for hid in history_ids:
+            for hid in active_ids:
                 rec = db.fetch_history_by_id(hid)
                 if rec:
                     body = rec.get("req_body")
@@ -5406,7 +5623,7 @@ class App(tk.Tk):
                     _build_params = set()
 
                 _build_kwargs = dict(
-                    history_ids=history_ids,
+                    history_ids=active_ids,
                     enabled_checks=enabled_checks,
                     do_query=self._mut_query.get(),
                     do_body_form=self._mut_form.get(),
@@ -5479,8 +5696,8 @@ class App(tk.Tk):
                             if _chk:
                                 _chk.enabled = _cid in active_passive
 
-                        self.log(f"[PASSIVE] Analyzing stored responses for {active_passive} — {len(history_ids)} request(s)")
-                        for _hid in history_ids:
+                        self.log(f"[PASSIVE] Analyzing stored responses for {active_passive} — {len(active_ids)} request(s)")
+                        for _hid in active_ids:
                             _rec = db.fetch_history_by_id(_hid)
                             if not _rec:
                                 continue
@@ -5553,7 +5770,7 @@ class App(tk.Tk):
             ]
             run_infodisc = bool(enabled_probes)
             if run_infodisc:
-                probe_urls = [self._scan_list[hid]["url"] for hid in history_ids]
+                probe_urls = [self._scan_list[hid]["url"] for hid in active_ids]
                 self._start_aux_scan_thread(
                     self._run_probe_scan, urls=probe_urls, probe_ids=enabled_probes,
                 )

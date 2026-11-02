@@ -69,6 +69,52 @@ def list_projects() -> list[Path]:
     )
 
 
+def _sanitize_name(name: str) -> str:
+    """Sanitize без fallback «project» (для rename пустота — ошибка)."""
+    return "".join(
+        c if (c.isalnum() or c in "-_.") else "_"
+        for c in (name or "")
+    ).strip("._ ")
+
+
+def rename_project(proj_dir, new_name: str) -> Path:
+    """Переименовывает папку проекта внутри её родительского каталога.
+
+    • имя санитизируется (пробелы/слеши/спецсимволы → ``_``);
+    • пустое после sanitize имя → ValueError;
+    • несуществующий путь / не директория → ValueError;
+    • новое имя совпадает с текущим → возвращает путь без изменений;
+    • target уже существует → ValueError (ничего не перезаписываем);
+    • после rename пересоздаются подкаталоги (``reports``); файлы (history.db,
+      settings.json, auth_session.json) переносятся вместе с папкой.
+
+    Возвращает новый Path.
+    """
+    from pathlib import Path as _Path
+
+    proj_dir = _Path(proj_dir)
+    if not proj_dir.exists() or not proj_dir.is_dir():
+        raise ValueError(f"Project directory does not exist: {proj_dir}")
+
+    cleaned = _sanitize_name(str(new_name if new_name is not None else ""))
+    if not cleaned:
+        raise ValueError(
+            "Project name is empty after sanitization (use letters/digits/-_.)"
+        )
+
+    if proj_dir.name == cleaned:
+        return proj_dir  # no-op: имя не изменилось
+
+    target = proj_dir.parent / cleaned
+    if target.exists():
+        raise ValueError(f"Project '{cleaned}' already exists: {target}")
+
+    proj_dir.rename(target)
+    for sub in PROJECT_SUBDIRS:
+        (target / sub).mkdir(exist_ok=True)
+    return target
+
+
 def is_project_dir(path: Path) -> bool:
     """Грубая проверка, что папка похожа на проект (есть БД или она пустая)."""
     p = Path(path)

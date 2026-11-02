@@ -776,6 +776,17 @@ _RAW_MESSAGES: tuple[tuple[str, str], ...] = (
         "авторизация; проверь Cookie/OTP/авто-логин.",
     ),    ("Route scan traffic through the local proxy (slower; normally OFF)", "Гнать трафик скана через локальный прокси (медленнее; обычно ВЫКЛ)"),
 
+    # ─────────────────────────── Liveness / rename project ───────────────────────────
+    ("Rename Project", "Переименовать проект"),
+    ("Rename Project…", "Переименовать проект…"),
+    ("Rename", "Переименовать"),
+    ("New name:", "Новое имя:"),
+    ("Could not rename project: {error}", "Не удалось переименовать проект: {error}"),
+    ("Hosts unavailable and skipped: {hosts}", "Хосты недоступны и пропущены: {hosts}"),
+    (
+        "Hosts unavailable and skipped: {hosts}. Scan cancelled.",
+        "Хосты недоступны и пропущены: {hosts}. Скан отменён.",
+    ),
 )
 
 import re as _re
