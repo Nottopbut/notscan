@@ -2436,6 +2436,22 @@ class App(tk.Tk):
         """
         host_headers = self._scan_host_headers()
         extra_headers = self._scan_probe_extra_headers()
+        # Probe-чеки тоже должны ходить с авто-логин сессией (Cookie/Authorization),
+        # если они не заданы пользователем вручную в probe_extra_headers.
+        try:
+            _auth_headers = self._current_auth_headers()
+            if _auth_headers:
+                _existing = {str(name).lower() for name, _val in extra_headers}
+                for _name, _value in _auth_headers.items():
+                    if _name.lower() not in _existing and _value:
+                        extra_headers.append((_name, _value))
+                if _auth_headers:
+                    self.log(
+                        "[PROBE] session auth headers added: "
+                        f"{sorted(_auth_headers.keys())}"
+                    )
+        except Exception as _exc:
+            self.log(f"[PROBE][WARN] session auth headers: {_exc}")
         runner = getattr(path_probe, "run_probe_scan", None)
         if runner is not None:
             kwargs = {"log_cb": self.log}
@@ -3444,6 +3460,55 @@ class App(tk.Tk):
         except Exception:
             return []
 
+    def _current_auth_headers(self) -> dict:
+        """Cookie/Authorization текущей авто-логин сессии (для preflight/probe).
+
+        Активный ScannerRunner получает эти заголовки через SessionManager, а
+        preflight и path-probe раньше ходили без них — из-за этого защищённые
+        цели выглядели «неавторизованными», хотя логин уже был выполнен.
+        """
+        mgr = getattr(self, "_session_manager", None)
+        if mgr is None or not bool(getattr(mgr, "auth_enabled", False)):
+            return {}
+        headers: dict[str, str] = {}
+        try:
+            store = getattr(mgr, "token_store", None)
+            cfg = getattr(mgr, "auth", None)
+            if store is not None:
+                token = getattr(store, "access_token", None)
+                if token:
+                    header = getattr(cfg, "token_header_name", "Authorization")
+                    prefix = getattr(cfg, "token_prefix", "Bearer ")
+                    headers[str(header)] = (str(prefix) + str(token)).strip()
+                cookies = getattr(store, "cookies", None) or {}
+                if cookies:
+                    headers["Cookie"] = "; ".join(
+                        f"{k}={v}" for k, v in cookies.items()
+                    )
+        except Exception:
+            return {}
+        return headers
+
+    @staticmethod
+    def _merge_auth_headers_for_request(headers: dict, auth_headers: dict) -> dict:
+        """Cookie мержится по именам (свежие session-cookies перетирают старые)."""
+        merged = dict(headers or {})
+        if not auth_headers:
+            return merged
+        for name, value in auth_headers.items():
+            if not value:
+                continue
+            if name.lower() == "cookie" and merged.get("Cookie"):
+                try:
+                    merged["Cookie"] = scanner_core._merge_cookie_headers(
+                        str(merged.get("Cookie") or ""), str(value)
+                    )
+                    continue
+                except Exception:
+                    pass
+            merged[name] = value
+        return merged
+
     @staticmethod
     def _parse_nonneg_float(value, default: float = 0.0) -> float:
         """float >= 0 из текстового поля; мусор/пусто/минус → default."""
@@ -3774,6 +3839,11 @@ class App(tk.Tk):
                 headers = _json.loads(rec.get("req_headers") or "{}")
             except Exception:
                 headers = {}
+            # Preflight — с той же авто-логин сессией, иначе защищённая цель
+            # ошибочно выглядит неавторизованной (пользователь видит ложный warn).
+            headers = self._merge_auth_headers_for_request(
+                headers, self._current_auth_headers()
+            )
             import httpx
             with httpx.Client(verify=False, timeout=5.0, follow_redirects=False) as client:
                 resp = client.get(url, headers=headers)

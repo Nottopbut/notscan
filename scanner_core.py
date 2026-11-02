@@ -2091,6 +2091,7 @@ def _persist_task_result(
     confidence: Optional[float] = None,
     calibration_cache: Optional[dict] = None,
     calibration_lock: Optional[threading.Lock] = None,
+    effective_headers: Optional[dict] = None,
 ) -> None:
     """Все синхронные записи по одной задаче (вызывается через asyncio.to_thread).
 
@@ -2210,9 +2211,14 @@ def _persist_task_result(
     except Exception as cal_exc:
         logger.debug("host calibration update failed: %s", cal_exc)
 
-    # Build raw request string
+    # Build raw request string: показываем РЕАЛЬНО отправленные заголовки,
+    # включая Cookie/Authorization из авто-логина (раньше в Request detail
+    # был исходный task.headers без сессии — выглядело, будто auth не применился).
     raw_request = templating.build_raw_http(
-        task.method, task.url, task.headers, task.body
+        task.method,
+        task.url,
+        effective_headers if effective_headers is not None else task.headers,
+        task.body,
     )
     raw_request = redact_raw_http(raw_request)
     db.insert_scan_request(
@@ -2572,7 +2578,8 @@ class ScannerRunner:
                 session_headers["Cookie"] = "; ".join(
                     f"{k}={v}" for k, v in store.cookies.items()
                 )
-        self.log_cb("[SCAN] Session auth applied for workers")
+        names = ", ".join(sorted(session_headers.keys())) if session_headers else "—"
+        self.log_cb(f"[SCAN] Session auth applied for workers: {names}")
         return session_headers
 
     def _thread_main(self, session_headers: Optional[dict]) -> None:
@@ -2758,6 +2765,7 @@ class ScannerRunner:
                             self._record_auth_observation(
                                 status_code, dict(resp.headers)
                             )
+                            headers = retry_headers
                             self.log_cb(
                                 f"[SESSION] Retry after re-login: {status_code} "
                                 f"for {task.url[:60]}"
@@ -2901,6 +2909,7 @@ class ScannerRunner:
                 await self._run_checks_layer(
                     task, resp, status_code, resp_text, error,
                     baseline_text, baseline_ms,
+                    effective_headers=headers,
                 )
 
         except asyncio.CancelledError:
@@ -2929,6 +2938,7 @@ class ScannerRunner:
                 confidence=blind_confidence,
                 calibration_cache=self._calibration_cache,
                 calibration_lock=self._calibration_lock,
+                effective_headers=headers,
             )
         except asyncio.CancelledError:
             raise
@@ -2946,19 +2956,28 @@ class ScannerRunner:
         error: Optional[str],
         baseline_text: str,
         baseline_ms: float,
+        effective_headers: Optional[dict] = None,
     ) -> None:
         """CheckRegistry в отдельном потоке (внутри — синхронные db-записи)."""
 
         def _call() -> None:
             elapsed = getattr(resp, "elapsed", None)
             elapsed_ms = (elapsed.total_seconds() * 1000.0) if elapsed else 0.0
-            raw_req = templating.build_raw_http(
-                task.method, task.url, task.headers, task.body
+            # checks-слой тоже сохраняет raw_request: берём РЕАЛЬНО отправленные
+            # заголовки (с Cookie/Authorization из авто-логина), иначе в Request
+            # detail снова появляется вариант без сессии.
+            _eff_headers = (
+                effective_headers if effective_headers is not None else task.headers
+            )
+            raw_req = redact_raw_http(
+                templating.build_raw_http(
+                    task.method, task.url, _eff_headers, task.body
+                )
             )
             check_kwargs: dict = {
                 "method": task.method,
                 "url": task.url,
-                "headers": task.headers,
+                "headers": _eff_headers,
                 "body": task.body or b"",
                 "raw_http": raw_req,
                 "resp_status": status_code,

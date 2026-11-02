@@ -86,6 +86,11 @@ and reports.
   the log shows the actual speed (`[SCAN] Speed: … tasks/s`, `Rate limit applied: …`).
   The old Settings→ROE “Max requests/sec” field was removed (it no longer overrides
   the new fields).
+- **Auto-login session is applied everywhere** — the active session Cookie/
+  Authorization is now used not only for payload tasks but also for preflight and probe
+  checks; Request detail stores the headers that were actually sent
+  (`Cookie: ***REDACTED***`), and the log shows `[SCAN] Session auth applied for workers:
+  Cookie` — no more “the login template is not used” confusion.
 - **Target liveness check before scanning** — before building tasks, notscan probes
   every unique host from the Scan list (HEAD → OPTIONS → GET, 3 s timeout). Dead hosts
   (connect error/timeout/DNS) are excluded from that scan: `[ALIVE] host — DEAD (...)`
@@ -191,7 +196,7 @@ make smoke    # headless GUI smoke test in xvfb on a temp copy of the project
 The repository ships a self-contained HTTP lab (`tests/lab/`) with intentionally vulnerable
 endpoints (reflected XSS, escaped reflection, SQL errors, redirects, delayed responses,
 CSRF-protected form, JSON API, cookie/CORS/SSRF/SSI cases, sensitive files/metafiles) used
-by 614 unit and integration tests. Proxy-lifecycle integration tests are skipped
+by 618 unit and integration tests. Proxy-lifecycle integration tests are skipped
 automatically when mitmproxy or a display is unavailable.
 
 ## Project structure
