@@ -1053,15 +1053,14 @@ def test_ssi_check_tp_executed_date():
     assert len(findings) == 1
 
 
-def test_ssi_check_tp_reflected_unescaped_is_weak():
+def test_ssi_check_fp_reflected_unescaped_is_not_finding():
+    """Raw-эхо SSI-директивы — обычная рефлексия запроса, НЕ находка (FP)."""
     findings = _run_check_class(
         "ssi_injection", payload=SSI_TP_PAYLOAD,
         resp_text=f"<html><body>{SSI_TP_PAYLOAD}</body></html>",
         resp_headers=HTML_HEADERS,
     )
-    assert len(findings) == 1
-    assert "needs manual verification" in findings[0].evidence
-    assert findings[0].severity.value == "MEDIUM"
+    assert findings == []
 
 
 def test_ssi_check_fp_no_directive_processing():
@@ -1125,14 +1124,12 @@ def test_ssi_indicator_all_real_payloads_escaped_echo_none():
                              {"content-type": "text/plain"}) is None
 
 
-def test_ssi_indicator_real_payloads_raw_echo_only_weak():
-    """Сырое echo (без экранирования) — только weak-сигнал, не «executed»."""
+def test_ssi_indicator_real_payloads_raw_echo_none():
+    """Сырое эхо (без экранирования) — НЕ находка: SSI-движок не исполнял."""
     for payload in _payload_lines("ssi.txt"):
         evidence = ssi_indicator(payload, _html_escape_echo(payload).replace(
             html.escape(payload), payload), HTML_HEADERS)
-        assert evidence, f"{payload!r}: weak-сигнал потерян"
-        assert "needs manual verification" in evidence, evidence
-        assert "executed" not in evidence.lower(), evidence
+        assert evidence is None, f"{payload!r}: raw echo должен подавляться, got {evidence!r}"
 
 
 def test_ssi_check_tp_executed_outputs():

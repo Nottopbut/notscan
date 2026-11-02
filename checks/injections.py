@@ -840,7 +840,6 @@ SSI_ENV_RE = re.compile(
 # Вывод <!--#exec cmd="id" --> / <!--#include virtual="/etc/passwd" -->.
 SSI_EXEC_RE = re.compile(r"\b(uid=\d+(?:\(\w+\))?|gid=\d+|root:x:0:0)\b")
 # Сырая (необработанная) SSI-директива в payload'е.
-_SSI_RAW_DIRECTIVE_RE = re.compile(r"<!--#\s*[A-Za-z_]+[^>]*-->", re.IGNORECASE)
 
 
 def _ssi_escaped_payload_forms(payload: str) -> list[str]:
@@ -882,13 +881,11 @@ def ssi_indicator(
     Уровни доказательства:
       1) SSI-ошибки (Apache: "[an error occurred while processing this directive]");
       2) исполнение директивы — вывод date/printenv/exec/маркер (директива НЕ
-         отразилась ни в одной форме, т.е. её реально обработал SSI-движок);
-      3) слабый сигнал — директива из payload'а отразилась в HTML-ответе
-         НЕэкранированной (возможна SSI-инъекция в SSI-обрабатываемом шаблоне;
-         требует ручной проверки — помечается в evidence).
+         отразилась ни в одной форме, т.е. её реально обработал SSI-движок).
 
-    Выполненная директива заменяется выводом, а не отражается; поэтому
-    HTML-escaped/URL-encoded эхо (``&lt;!--#echo ... --&gt;``) — НЕ находка.
+    Простое отражение payload'а — НЕ находка: ни raw, ни HTML-escaped, ни
+    URL-encoded, ни JSON/plain-эхо. Выполненная директива заменяется выводом,
+    а не отражается; raw-эхо — обычная рефлексия запроса (главный FP-источник).
     """
     if not payload or not response_text:
         return None
@@ -924,15 +921,7 @@ def ssi_indicator(
             if m:
                 return f"SSI directive output — command/file data '{m.group(1)}'"
 
-    # Слабый сигнал: неэкранированная SSI-директива в HTML-ответе.
-    directive = _SSI_RAW_DIRECTIVE_RE.search(payload)
-    if directive:
-        if not html_ok:
-            return None
-        if directive.group(0) in response_text:
-            return ("SSI directive reflected unescaped into HTML response — "
-                    f"possible SSI injection (needs manual verification): "
-                    f"'{directive.group(0)[:100]}'")
+    # Отражение директивы (raw/escaped/url-encoded) — не исполнение: не находка.
     return None
 
 
@@ -1023,9 +1012,9 @@ def html_injection_indicator(
                     f"'{found.group()[:120]}' (HTML injection, без JS-исполнения)")
         return None
 
-    # Fallback: payload с маркером отразился целиком/частично.
-    if payload in response_text:
-        return f"HTML-payload с маркером отражён verbatim: '{payload[:120]}'"
+    # Fallback «payload reflected verbatim» удалён: это echo-only сигнал без
+    # контекста реального HTML-тега (FP). Находка — только маркерный тег,
+    # найденный regex-ом выше (неэкранированный, в HTML-ответе).
     return None
 
 

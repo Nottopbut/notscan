@@ -86,6 +86,20 @@ and reports.
   the log shows the actual speed (`[SCAN] Speed: … tasks/s`, `Rate limit applied: …`).
   The old Settings→ROE “Max requests/sec” field was removed (it no longer overrides
   the new fields).
+- **Clear post-scan auth diagnostics** — 401/403 no longer raise false alarms:
+  real auth problems are 401, 403 without a session, and login-challenge responses;
+  **403 with a valid session** (WAF/filter/blocked payload) and login-form mutation
+  responses are informational only. When auto-relogin recovered the session, the
+  “check Cookie/OTP” modal is not shown — `auto-relogin recovered N× — session OK`.
+- **Fewer reflection false positives** — XSS/HTML-injection/SSI no longer flag plain
+  payload echo: URL-encoded reflection (`%3Cscript%3E`) in HTML is not XSS (the browser
+  does not decode percent-encoding in HTML), while HTML-escaped/JSON/plain/404 echo
+  and SSI raw echo are suppressed; only direct unescaped HTML/SSI execution and real
+  error signatures are reported.
+- **Payloads only in parameters/body/headers/cookies** — path/directory mutations
+  (`/{directory}?any_param=test`) are removed from GUI scans: the “Path segments”
+  checkbox is gone, `do_path=False` always; this eliminates directory 403/404 noise
+  and false positives.
 - **Auto-login session is applied everywhere** — the active session Cookie/
   Authorization is now used not only for payload tasks but also for preflight and probe
   checks; Request detail stores the headers that were actually sent
@@ -196,7 +210,7 @@ make smoke    # headless GUI smoke test in xvfb on a temp copy of the project
 The repository ships a self-contained HTTP lab (`tests/lab/`) with intentionally vulnerable
 endpoints (reflected XSS, escaped reflection, SQL errors, redirects, delayed responses,
 CSRF-protected form, JSON API, cookie/CORS/SSRF/SSI cases, sensitive files/metafiles) used
-by 618 unit and integration tests. Proxy-lifecycle integration tests are skipped
+by 662 unit and integration tests. Proxy-lifecycle integration tests are skipped
 automatically when mitmproxy or a display is unavailable.
 
 ## Project structure

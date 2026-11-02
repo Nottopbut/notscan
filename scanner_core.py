@@ -18,7 +18,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 import httpx
 
@@ -1515,16 +1515,6 @@ FILEUPLOAD_ERROR_SIGS = [
 # in the GUI, but the row is still visible (all response codes shown).
 # ─────────────────────────────────────────────────────────────────
 
-def _reflect(payload: str, text: str, label: str) -> Optional[str]:
-    """Return evidence string if payload (or url-encoded form) appears in text."""
-    if payload in text:
-        return f"{label}: payload reflected ({payload[:60]})"
-    encoded = urllib.parse.quote(payload)
-    if encoded != payload and encoded in text:
-        return f"{label}: payload reflected url-enc ({encoded[:60]})"
-    return None
-
-
 def _sig_match(text: str, sigs: list[str], label: str) -> Optional[str]:
     """Return evidence string on first signature hit."""
     lower = text.lower()
@@ -1557,6 +1547,10 @@ def match_xss(
     #  • payload, уже присутствовавший в baseline-ответе, — не наш сигнал.
     if not payload:
         return None
+    # 4xx/5xx — error-страницы: их тело часто содержит отражённый URL/запрос
+    # (path-мутации), это FP без контекста инъекции.
+    if status_code and int(status_code) >= 400:
+        return None
     try:
         if _fp_is_bare_html_tag(payload):
             return None
@@ -1569,7 +1563,10 @@ def match_xss(
         except Exception:
             pass
     if any(c in payload for c in "<>\"'"):
-        return _reflect(payload, response_text, "XSS reflection")
+        # Только DIRECT (неэкранированное) отражение. URL-encoded эхо
+        # (``%3Cscript%3E``) НЕ XSS: браузер не percent-декодирует HTML.
+        if payload in response_text:
+            return f"XSS reflection: payload reflected verbatim ({payload[:60]})"
     return None
 
 
@@ -1954,6 +1951,69 @@ def _build_raw_response_preview(resp: httpx.Response, resp_text: str) -> str:
     return redact_raw_http(raw)
 
 
+#: Сколько URL-примеров печатать в итоговом [AUTH]-логе.
+AUTH_LOG_EXAMPLE_LIMIT = 3
+
+#: Токены login-челленджа в Location (redirect на форму логина).
+_LOGIN_LOCATION_TOKENS = ("login", "signin", "sign-in", "logon", "sso", "auth")
+#: Пути login-endpoint'ов: мутация login-формы не является auth-failure скана.
+_LOGIN_ENDPOINT_PATH_TOKENS = ("login", "signin", "sign-in", "logon", "signon", "auth")
+_LOGIN_ENDPOINT_METHODS = frozenset({"POST", "PUT", "PATCH"})
+#: HTML password-форма в теле ответа — признак login-челленджа.
+_PASSWORD_FORM_RE = re.compile(r"<input[^>]+type\s*=\s*['\"]?password", re.IGNORECASE)
+_PASSWORD_NAME_RE = re.compile(r"name\s*=\s*['\"]?password", re.IGNORECASE)
+
+
+def _headers_have_auth(headers: Optional[dict]) -> bool:
+    """True, если в реально отправленных заголовках есть Cookie/Authorization."""
+    for key, value in (headers or {}).items():
+        if (
+            str(key).lower() in ("cookie", "authorization", "proxy-authorization")
+            and str(value or "").strip()
+        ):
+            return True
+    return False
+
+
+def _is_login_endpoint_request(method: Optional[str], url: str) -> bool:
+    """True для POST/PUT/PATCH на login-endpoint (мутации login-формы).
+
+    Ответы таких запросов (401/403/302-login) — результат тестирования формы
+    логина, а не потеря сессии скана: их не считаем auth-failure.
+    """
+    if (method or "").upper() not in _LOGIN_ENDPOINT_METHODS:
+        return False
+    try:
+        path = urlsplit(url or "").path.lower()
+    except Exception:
+        return False
+    return any(token in path for token in _LOGIN_ENDPOINT_PATH_TOKENS)
+
+
+def _looks_like_login_challenge(
+    status_code: int,
+    response_headers: Optional[dict],
+    resp_text: str = "",
+) -> bool:
+    """True, если ответ — login-челлендж (redirect на login или password-форма).
+
+    Проверяем только 3xx/401/403 (не 200-страницы), чтобы не ловить обычные
+    страницы со скрытой формой логина.
+    """
+    if int(status_code) not in (401, 403) and not (300 <= int(status_code) < 400):
+        return False
+    headers = response_headers or {}
+    location = headers.get("Location") or headers.get("location") or ""
+    if 300 <= int(status_code) < 400 and any(
+        token in str(location).lower() for token in _LOGIN_LOCATION_TOKENS
+    ):
+        return True
+    text = (resp_text or "")[:50_000]
+    if text and (_PASSWORD_FORM_RE.search(text) or _PASSWORD_NAME_RE.search(text)):
+        return True
+    return False
+
+
 def _is_auth_error_response(
     status_code: Optional[int],
     response_headers: Optional[dict],
@@ -2313,9 +2373,21 @@ class ScannerRunner:
 
         # ── Auth preflight counters (GUI предупреждает после скана) ──
         self._auth_lock = threading.Lock()
+        # Реальные проблемы авторизации (401; 403 без cookie; login-challenge).
         self.auth_failure_count = 0
+        # 403 при ПРИМЕНЁННОЙ сессии → WAF/фильтр/заблокированный payload:
+        # informational, в warning не попадает.
+        self.auth_blocked_count = 0
+        # Ответы мутаций login-endpoint'а (login-форма) — не auth-failure.
+        self.auth_login_endpoint_count = 0
+        # login-redirect'ы (3xx Location=login) среди реальных failures.
         self.auth_redirect_count = 0
         self.last_auth_status: Optional[int] = None
+        self._auth_failure_examples: list[str] = []
+        self._auth_blocked_examples: list[str] = []
+        # Сколько раз auto-relogin реально восстановил сессию (informational:
+        # если сессия перелогинена, пугать пользователя не нужно).
+        self.auth_recovered_count = 0
         self._tasks_total = len(tasks)
         self._completed = 0
         self._in_flight = 0
@@ -2489,58 +2561,126 @@ class ScannerRunner:
                 f"(private={private}, allowlist={allowlist}, other={other}){suffix}"
             )
 
-    # ── Auth-ответы: агрегированные счётчики (401/403/login-redirect) ──
+    # ── Auth-ответы: классификация 401/403/login-challenge ──────────
 
     def _record_auth_observation(
         self,
         status_code: Optional[int],
         response_headers: Optional[dict] = None,
+        *,
+        auth_applied: bool = False,
+        resp_text: str = "",
+        url: str = "",
+        method: str = "",
     ) -> None:
-        """Считает 401/403 и редиректы на login; поведение скана не меняет."""
+        """Классифицирует ответ: реальный auth-failure vs WAF/blocked.
+
+        Считает только настоящие проблемы авторизации:
+          • 401 — всегда auth-failure;
+          • 403 без применённой сессии — auth-failure;
+          • 403/302 с login-challenge (Location login/signin/sso или
+            password-форма в теле) — auth-failure;
+          • 403 ПРИ применённой сессии без login-признаков — auth_blocked
+            (WAF/фильтр/заблокированный payload; informational, НЕ warning);
+          • ответы мутаций login-endpoint запросов — auth_login_endpoint
+            (результат проверки login-формы, не потеря сессии).
+
+        Поведение скана не меняет — только счётчики/итоговый лог.
+        """
         if status_code is None:
             return
-        auth_failure = status_code in (401, 403)
-        is_login_redirect = False
-        if not auth_failure and 300 <= int(status_code) < 400 and response_headers:
-            location = (
-                response_headers.get("Location")
-                or response_headers.get("location")
-                or ""
-            )
-            is_login_redirect = "login" in str(location).lower()
-        if not auth_failure and not is_login_redirect:
+        status = int(status_code)
+
+        if _is_login_endpoint_request(method, url):
+            with self._auth_lock:
+                self.auth_login_endpoint_count += 1
             return
+
+        challenge = _looks_like_login_challenge(status, response_headers, resp_text)
+        if status == 401:
+            category = "failure"
+        elif status == 403:
+            category = "failure" if (challenge or not auth_applied) else "blocked"
+        elif 300 <= status < 400 and challenge:
+            category = "failure"
+        else:
+            return
+
         with self._auth_lock:
-            # 401/403 — реальные признаки отсутствия авторизации. Редирект на
-            # login часто просто поведение конкретного мутированного URL
-            # (path-мутация) и не должен пугать пользователя.
-            if auth_failure:
-                self.auth_failure_count += 1
+            if category == "blocked":
+                self.auth_blocked_count += 1
+                if (
+                    url
+                    and url not in self._auth_blocked_examples
+                    and len(self._auth_blocked_examples) < AUTH_LOG_EXAMPLE_LIMIT
+                ):
+                    self._auth_blocked_examples.append(url)
             else:
-                self.auth_redirect_count += 1
-            self.last_auth_status = int(status_code)
+                self.auth_failure_count += 1
+                self.last_auth_status = status
+                if challenge and 300 <= status < 400:
+                    self.auth_redirect_count += 1
+                if (
+                    url
+                    and url not in self._auth_failure_examples
+                    and len(self._auth_failure_examples) < AUTH_LOG_EXAMPLE_LIMIT
+                ):
+                    self._auth_failure_examples.append(url)
 
     def auth_stats(self) -> dict:
-        """Снимок auth-counters (GUI предупреждает о 401/403 после скана)."""
+        """Снимок auth-counters (GUI предупреждает только по auth_failure_count)."""
         with self._auth_lock:
             return {
                 "auth_failure_count": self.auth_failure_count,
+                "auth_blocked_count": self.auth_blocked_count,
+                "auth_login_endpoint_count": self.auth_login_endpoint_count,
                 "auth_redirect_count": self.auth_redirect_count,
                 "last_auth_status": self.last_auth_status,
+                "auth_recovered_count": self.auth_recovered_count,
+                "failure_examples": list(self._auth_failure_examples),
+                "blocked_examples": list(self._auth_blocked_examples),
             }
 
     def _log_auth_summary(self) -> None:
         stats = self.auth_stats()
-        if stats["auth_failure_count"]:
+        failures = stats["auth_failure_count"]
+        blocked = stats["auth_blocked_count"]
+        login_endpoint = stats["auth_login_endpoint_count"]
+        if failures:
+            suffix = ""
+            if stats["failure_examples"]:
+                suffix = "; examples: " + ", ".join(
+                    stats["failure_examples"][:AUTH_LOG_EXAMPLE_LIMIT]
+                )
+            if stats.get("auth_recovered_count"):
+                # Сессия перелогинена автоматически: для пользователя это не
+                # проблема (не пугаем warning'ом).
+                self.log_cb(
+                    f"[AUTH] {failures} auth-challenge responses, session "
+                    f"auto-relogin recovered {stats['auth_recovered_count']}× "
+                    f"(last status={stats['last_auth_status']}; informational) "
+                    f"— повторный логин выполнен автоматически{suffix}"
+                )
+            else:
+                self.log_cb(
+                    f"[AUTH] {failures} real auth failures (401/auth-challenge; "
+                    f"last status={stats['last_auth_status']}) — проверь "
+                    f"Cookie/OTP/авто-логин{suffix}"
+                )
+        if blocked:
+            suffix = ""
+            if stats["blocked_examples"]:
+                suffix = "; examples: " + ", ".join(
+                    stats["blocked_examples"][:AUTH_LOG_EXAMPLE_LIMIT]
+                )
             self.log_cb(
-                f"[AUTH] {stats['auth_failure_count']} responses with 401/403 "
-                f"(last status={stats['last_auth_status']}) — проверь "
-                f"Cookie/OTP/авто-логин"
+                f"[AUTH] {blocked} responses 403 (auth applied, likely "
+                f"WAF/filter/blocked) — informational, not an auth problem{suffix}"
             )
-        elif stats.get("auth_redirect_count"):
+        if login_endpoint:
             self.log_cb(
-                f"[AUTH] {stats['auth_redirect_count']} login-redirects during scan "
-                f"(informational; часто это поведение мутированных URL)"
+                f"[AUTH] {login_endpoint} login-endpoint responses (login-form "
+                f"mutations; informational, не auth-failure)"
             )
 
     def _login_session(self) -> Optional[dict]:
@@ -2696,6 +2836,9 @@ class ScannerRunner:
             return session_headers
 
         headers = _merge_session_headers(task.headers, session_headers)
+        # Был ли Cookie/Authorization в РЕАЛЬНО отправленных заголовках: нужно
+        # для классификации 403 (auth applied → WAF/blocked, не auth-failure).
+        auth_applied = _headers_have_auth(headers)
 
         status_code: Optional[int] = None
         error: Optional[str] = None
@@ -2727,7 +2870,14 @@ class ScannerRunner:
             elapsed_ms_obs = (time.perf_counter() - start_ts) * 1000.0
             resp_text = resp.text[:RESP_PREVIEW_SIZE]
             raw_response_preview = _build_raw_response_preview(resp, resp_text)
-            self._record_auth_observation(status_code, dict(resp.headers))
+            self._record_auth_observation(
+                status_code,
+                dict(resp.headers),
+                auth_applied=auth_applied,
+                resp_text=resp_text,
+                url=task.url,
+                method=task.method,
+            )
 
             # ── Session drift monitor + auto-relogin on 401/403 ──
             if _is_auth_error_response(status_code, dict(resp.headers), resp_text):
@@ -2745,6 +2895,8 @@ class ScannerRunner:
                     )
                     if new_headers is not None:
                         session_headers = new_headers
+                        with self._auth_lock:
+                            self.auth_recovered_count += 1
                         # Retry the same request with new headers
                         retry_headers = _merge_session_headers(
                             task.headers, session_headers
@@ -2763,7 +2915,12 @@ class ScannerRunner:
                                 resp, resp_text
                             )
                             self._record_auth_observation(
-                                status_code, dict(resp.headers)
+                                status_code,
+                                dict(resp.headers),
+                                auth_applied=_headers_have_auth(retry_headers),
+                                resp_text=resp_text,
+                                url=task.url,
+                                method=task.method,
                             )
                             headers = retry_headers
                             self.log_cb(
@@ -2812,7 +2969,12 @@ class ScannerRunner:
                     false_status = false_resp.status_code
                     false_text = false_resp.text[:BLIND_TEXT_LIMIT]
                     self._record_auth_observation(
-                        false_status, dict(false_resp.headers)
+                        false_status,
+                        dict(false_resp.headers),
+                        auth_applied=_headers_have_auth(false_headers),
+                        resp_text=false_text,
+                        url=task.pair_url,
+                        method=task.method,
                     )
                 except asyncio.CancelledError:
                     raise

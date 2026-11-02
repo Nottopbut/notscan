@@ -472,6 +472,16 @@ class TestMatchXss:
         assert evidence is not None
         assert "XSS" in evidence
 
+    def test_url_encoded_reflection_is_not_xss(self):
+        # FP: percent-encoded эхо в HTML браузер не декодирует → не XSS.
+        payload = "<script>alert(1)</script>"
+        encoded = urllib.parse.quote(payload, safe="")
+        body = f"<html><a href='/?q={encoded}'>self</a></html>"
+        assert scanner_core.match_xss(
+            payload, body, 200, {"content-type": "text/html"}
+        ) is None
+        assert scanner_core.match_xss(payload, body, 200) is None
+
     def test_run_matcher_passes_headers_for_xss(self):
         # через run_matcher заголовки тоже должны учитываться
         assert scanner_core.run_matcher(

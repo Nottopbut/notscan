@@ -55,6 +55,14 @@ python notscan.py
   только Max — верхний предел; Delay — фиксированная пауза. После скана в логе
   выводятся фактическая скорость и статистика лимитера. Старое Settings→ROE
   «Max requests/sec» удалено (не переопределяет новые поля).
+- **Auth-диагностика:** 401; 403 без сессии; 403/302 с login-challenge —
+  auth-проблемы. 403 с валидной Cookie (WAF/фильтр) и мутации login-формы —
+  informational; при auto-relogin предупреждение не показывается.
+- **Path/directory-мутации убраны из GUI:** payloads подставляются только в
+  query/body/headers/cookies; «Path segments» чекбокса нет, path-эхо/403/404-шум
+  не создаётся.
+- **FP отражений:** URL-encoded/HTML-escaped/JSON echo и SSI raw-echo не
+  считаются уязвимостями; XSS — только direct unescaped HTML-контекст.
 - **Liveness перед сканом:** для каждого уникального хоста из Scan list отправляется
   HEAD/OPTIONS/GET-проба (timeout 3 с). Мёртвые хосты пропускаются в этом скане
   (`[ALIVE] … DEAD` + предупреждение), при отсутствии живых — скан отменяется.

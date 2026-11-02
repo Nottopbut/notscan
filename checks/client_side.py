@@ -50,6 +50,10 @@ class XSSReflectedCheck(BaseCheck):
             return self.skip()
         if not ctx.payload:
             return self.skip()
+        # Error-страницы (404/500/...): сервер часто печатает туда весь URL
+        # (частый FP при path-мутациях) — это не контекст HTML-инъекции.
+        if resp.status_code and resp.status_code >= 400:
+            return self.ok()
         # Только payload, способные разорвать HTML-структуру (< > " ').
         if not any(c in ctx.payload for c in "<>\"'"):
             return self.ok()
@@ -66,7 +70,9 @@ class XSSReflectedCheck(BaseCheck):
         if not is_html_response(resp.headers):
             return self.ok()
 
-        # Direct reflection
+        # Только DIRECT (неэкранированное) отражение в HTML-контексте.
+        # URL-encoded эхо (%3Cscript%3E) НЕ является XSS: браузер не
+        # percent-декодирует HTML, поэтому такой payload инертен.
         if ctx.payload in resp.text:
             return self.found(self.make_finding(
                 f"XSS payload reflected verbatim: {ctx.payload[:80]}",
@@ -74,15 +80,8 @@ class XSSReflectedCheck(BaseCheck):
                 recommendation="Encode output contextually (HTML-encode, JS-encode).",
             ))
 
-        # URL-encoded reflection (те же FP-проверки применены выше)
-        encoded = urllib.parse.quote(ctx.payload, safe="")
-        if encoded != ctx.payload and encoded in resp.text:
-            return self.found(self.make_finding(
-                f"XSS payload reflected URL-encoded: {encoded[:80]}",
-                req, resp, ctx, severity=Severity.MEDIUM,
-            ))
-
-        # (partial-reflection heuristic removed: флагало "alert"/"<script" даже при HTML-кодировании)
+        # (partial/url-encoded reflection heuristics удалены как FP-источники:
+        # флагали "alert"/"<script" и percent-encoded эхо без контекста исполнения)
         return self.ok()
 
 

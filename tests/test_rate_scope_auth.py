@@ -55,14 +55,21 @@ class FakeClock:
         self.now += max(0.0, float(seconds))
 
 
-def _task(url: str, *, pair_url: str = "", check_type: str = "cmdi"):
+def _task(
+    url: str,
+    *,
+    pair_url: str = "",
+    check_type: str = "cmdi",
+    method: str = "GET",
+    headers: dict | None = None,
+):
     return scanner_core.ScanTask(
         template_id=f"t-{abs(hash(url))}-{time.time_ns()}",
         check_type=check_type,
         payload="x",
-        method="GET",
+        method=method,
         url=url,
-        headers={},
+        headers=dict(headers or {}),
         body=b"",
         raw_http="",
         mutation_point="query",
@@ -105,6 +112,19 @@ class _StatusHandler(http.server.BaseHTTPRequestHandler):
             self._send(403, "forbidden")
         elif parsed.path == "/login-redirect":
             self._send(302, "", {"Location": "/login?next=/"})
+        else:
+            self._send(200, "ok")
+
+    def do_POST(self) -> None:  # noqa: N802
+        self._record()
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(length)
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path.endswith("/login.php"):
+            self._send(302, "", {"Location": "/login.php"})
+        elif parsed.path == "/forbid":
+            self._send(403, "forbidden")
         else:
             self._send(200, "ok")
 
@@ -385,12 +405,99 @@ def test_auth_failure_counters(status_server, tmp_db):
     )
     _run(runner)
     stats = runner.auth_stats()
-    # 401+403 — реальные auth-failures; login-redirect считается отдельно
-    # (может быть нормальным поведением для мутированных URL).
-    assert runner.auth_failure_count == 2, stats
+    # 401, 403 без сессии и login-challenge redirect — реальные auth-failures;
+    # redirect входит в failures и дополнительно считается auth_redirect_count.
+    assert runner.auth_failure_count == 3, stats
     assert stats["auth_redirect_count"] == 1, stats
     assert runner.last_auth_status == 302, stats
-    assert any("[AUTH] 2 responses with 401/403" in m for m in logs), logs
+    assert any("3 real auth failures" in m for m in logs), logs
+
+
+def _run_tasks_with_auth(status_server, tmp_db, tasks, logs):
+    runner = scanner_core.ScannerRunner(
+        tasks, workers=1, log_callback=logs.append,
+        scope_allowlist=["127.0.0.1"], scope_block_private=True,
+    )
+    _run(runner)
+    return runner
+
+
+def test_generic_403_with_auth_is_blocked_not_warning(status_server, tmp_db):
+    """403 при валидной Cookie (WAF/фильтр) — auth_blocked, НЕ warning."""
+    logs: list[str] = []
+    tasks = [
+        _task(f"{status_server.base_url}/forbid?a=1",
+              headers={"Cookie": "session=good"}),
+        _task(f"{status_server.base_url}/forbid?a=2",
+              headers={"Cookie": "session=good"}),
+    ]
+    runner = _run_tasks_with_auth(status_server, tmp_db, tasks, logs)
+    stats = runner.auth_stats()
+    assert runner.auth_failure_count == 0, stats
+    assert stats["auth_blocked_count"] == 2, stats
+    assert not any("real auth failures" in m for m in logs), logs
+    assert any("likely WAF/filter/blocked" in m for m in logs), logs
+
+
+def test_403_without_auth_is_real_failure(status_server, tmp_db):
+    logs: list[str] = []
+    tasks = [_task(f"{status_server.base_url}/forbid")]
+    runner = _run_tasks_with_auth(status_server, tmp_db, tasks, logs)
+    assert runner.auth_failure_count == 1
+    assert runner.auth_stats()["auth_blocked_count"] == 0
+    assert runner.last_auth_status == 403
+
+
+def test_401_with_auth_is_real_failure(status_server, tmp_db):
+    logs: list[str] = []
+    tasks = [_task(f"{status_server.base_url}/unauth",
+                   headers={"Cookie": "session=good"})]
+    runner = _run_tasks_with_auth(status_server, tmp_db, tasks, logs)
+    assert runner.auth_failure_count == 1
+    assert runner.last_auth_status == 401
+
+
+def test_login_challenge_redirect_with_auth_is_failure(status_server, tmp_db):
+    logs: list[str] = []
+    tasks = [_task(f"{status_server.base_url}/login-redirect",
+                   headers={"Cookie": "session=good"})]
+    runner = _run_tasks_with_auth(status_server, tmp_db, tasks, logs)
+    stats = runner.auth_stats()
+    assert stats["auth_failure_count"] == 1, stats
+    assert stats["auth_redirect_count"] == 1, stats
+    assert stats["last_auth_status"] == 302
+
+
+def test_login_endpoint_post_302_ignored(status_server, tmp_db):
+    """Мутация login-формы (POST /login.php → 302 login) — не auth-failure."""
+    logs: list[str] = []
+    tasks = [
+        _task(f"{status_server.base_url}/login.php",
+              method="POST", headers={"Cookie": "session=good"}),
+    ]
+    runner = _run_tasks_with_auth(status_server, tmp_db, tasks, logs)
+    stats = runner.auth_stats()
+    assert stats["auth_failure_count"] == 0, stats
+    assert stats["auth_login_endpoint_count"] == 1, stats
+
+
+def test_auth_blocked_examples_capped_and_logged(status_server, tmp_db):
+    """Examples первых 3 URL в [AUTH]-логе, без warning пользователю."""
+    logs: list[str] = []
+    tasks = [
+        _task(f"{status_server.base_url}/forbid?n={i}",
+              headers={"Cookie": "session=good"})
+        for i in range(5)
+    ]
+    runner = _run_tasks_with_auth(status_server, tmp_db, tasks, logs)
+    stats = runner.auth_stats()
+    assert stats["auth_blocked_count"] == 5
+    assert len(stats["blocked_examples"]) == 3, stats
+    blocked_logs = [m for m in logs if "likely WAF/filter/blocked" in m]
+    assert blocked_logs
+    assert "examples:" in blocked_logs[0]
+    assert "n=0" in blocked_logs[0]
+    assert not any("real auth failures" in m for m in logs)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -645,6 +752,10 @@ class TestAutoRelogin:
             assert any("[SESSION] Retry after re-login: 200" in m for m in logs), logs
             stats = runner.auth_stats()
             assert stats["auth_failure_count"] >= 1, stats
+            # auto-relogin восстановил сессию → пользователя не пугаем warning'ом
+            assert stats["auth_recovered_count"] >= 1, stats
+            assert not any("real auth failures" in m for m in logs), logs
+            assert any("auto-relogin recovered" in m for m in logs), logs
         finally:
             manager.close()
 

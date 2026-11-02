@@ -1653,6 +1653,13 @@ while stack:
     except Exception:
         pass
 
+checks = {
+    label: any(t.strip() == label for t in texts)
+    for label in (
+        "Query params", "Body form", "Body JSON", "Headers",
+        "Cookies", "Path segments", "Multipart form-data",
+    )
+}
 res = {
     "has_vars": all(
         hasattr(app, name)
@@ -1663,22 +1670,24 @@ res = {
         bool(app._mut_path.get()),
         bool(app._mut_multipart.get()),
     ],
-    "has_checkbox_cookies": any(t.strip() == "Cookies" for t in texts),
-    "has_checkbox_path": any(t.strip() == "Path segments" for t in texts),
-    "has_checkbox_multipart": any(t.strip() == "Multipart form-data" for t in texts),
+    "checkboxes": checks,
 }
-# 1) дефолтный запуск — все True
+logs = []
+_orig_log = app.log
+app.log = lambda msg: (logs.append(str(msg)), _orig_log(msg))
+# 1) дефолтный запуск
 app.after(0, app._run_scan)
 app.after(1500, app.quit)
 app.mainloop()
-# 2) запуск с выключенными multi-boundary
+# 2) старые настройки: _mut_path=True НЕ должен включить path-мутации
 app._mut_cookies.set(False)
-app._mut_path.set(False)
+app._mut_path.set(True)
 app._mut_multipart.set(False)
 app.after(0, app._run_scan)
 app.after(1500, app.quit)
 app.mainloop()
 res["runs"] = captured
+res["logs"] = logs
 print("RESULT_JSON " + json.dumps(res, ensure_ascii=False))
 app._proxy_shutdown_done = True
 app.destroy()
@@ -1826,19 +1835,26 @@ def test_gui_multiboundary_mutation_checkboxes_and_kwargs(tmp_path):
     data = _run_gui_script(project, _MULTIBOUNDARY_SCRIPT, timeout=240)
 
     assert data["has_vars"] is True
-    assert data["defaults"] == [True, True, True], data["defaults"]
-    assert data["has_checkbox_cookies"] is True, "нет чекбокса Cookies"
-    assert data["has_checkbox_path"] is True, "нет чекбокса Path segments"
-    assert data["has_checkbox_multipart"] is True, "нет чекбокса Multipart form-data"
+    # _mut_path остаётся compat-переменной, но всегда False.
+    assert data["defaults"] == [True, False, True], data["defaults"]
+    checks = data["checkboxes"]
+    assert checks["Cookies"] is True, "нет чекбокса Cookies"
+    assert checks["Multipart form-data"] is True, "нет чекбокса Multipart form-data"
+    assert checks["Path segments"] is False, "чекбокс Path segments не убран"
+    for label in ("Query params", "Body form", "Body JSON", "Headers"):
+        assert checks[label] is True, f"пропал чекбокс {label}"
 
     runs = data.get("runs", [])
     assert len(runs) >= 2, f"build_scan_tasks вызван {len(runs)} раз: {runs}"
+    # do_path=False всегда, даже при _mut_path=True (старый settings.json).
     assert runs[0] == {
-        "do_cookies": True, "do_path": True, "do_body_multipart": True,
+        "do_cookies": True, "do_path": False, "do_body_multipart": True,
     }, runs[0]
     assert runs[1] == {
         "do_cookies": False, "do_path": False, "do_body_multipart": False,
     }, runs[1]
+    logs = "\n".join(data.get("logs") or [])
+    assert "Path mutations disabled" in logs, logs[-1000:]
 
 
 @pytest.mark.integration

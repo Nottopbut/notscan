@@ -374,14 +374,17 @@ class TestXSSReflectedCheckFilters(unittest.TestCase):
         findings = self._findings(payload, f"<html><body>{payload}</body></html>")
         self.assertEqual(len(findings), 1)
 
-    def test_url_encoded_reflection_found_in_html(self):
+    def test_url_encoded_reflection_not_found_in_html(self):
+        # Percent-encoded эхо НЕ XSS: браузер не URL-декодирует HTML,
+        # payload остаётся инертным текстом (%3Cscript%3E). Баг пользователя
+        # «много FP из-за отражения запроса в теле».
         payload = "<script>alert(1)</script>"
         encoded = urllib.parse.quote(payload, safe="")
         findings = self._findings(
             payload, f"<html><body>{encoded}</body></html>",
             {"Content-Type": "text/html"},
         )
-        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings, [])
 
     def test_url_encoded_reflection_not_found_in_json(self):
         payload = "<script>alert(1)</script>"

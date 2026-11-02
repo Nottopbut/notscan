@@ -727,7 +727,6 @@ _RAW_MESSAGES: tuple[tuple[str, str], ...] = (
         "Импортировано запросов: {count} (переменных окружения: {vars})",
     ),
     ("Failed to import: {error}", "Не удалось импортировать: {error}"),
-    ("Path segments", "Path-сегменты"),
     ("Multipart form-data", "Multipart-форма"),
     # ─────────────────────────── RPS/delay, scope, auth/OTP, preflight ───────────────────────────
     ("Min RPS:", "Min RPS:"),

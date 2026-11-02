@@ -1697,7 +1697,7 @@ class ScanConfigWindow(tk.Toplevel):
             ("Body JSON", p._mut_json),
             ("Headers", p._mut_headers),
             ("Cookies", p._mut_cookies),
-            ("Path segments", p._mut_path),
+            # Path-мутации убраны из GUI (payloads только в параметры/тело/headers).
             ("Multipart form-data", p._mut_multipart),
         ]:
             ttk.Checkbutton(mut_lf, text=text, variable=var).pack(
@@ -2266,9 +2266,11 @@ class App(tk.Tk):
         self._mut_form = tk.BooleanVar(value=True)
         self._mut_json = tk.BooleanVar(value=True)
         self._mut_headers = tk.BooleanVar(value=False)
-        # Multi-boundary mutations (Cookies / Path segments / Multipart form-data).
+        # Multi-boundary mutations (Cookies / Multipart form-data).
         self._mut_cookies = tk.BooleanVar(value=True)
-        self._mut_path = tk.BooleanVar(value=True)
+        # Path-мутации в GUI отключены навсегда; переменная сохранена как
+        # совместимый no-op (старые settings.json могли содержать ключ).
+        self._mut_path = tk.BooleanVar(value=False)
         self._mut_multipart = tk.BooleanVar(value=True)
         # Rate limiting (Advanced): 0/пусто = off. Новые поля — primary.
         self._roe_min_rps_var = tk.StringVar(value="0")
@@ -3963,6 +3965,8 @@ class App(tk.Tk):
         # единственный источник Max RPS — поле Advanced.
         _set_var("_roe_max_rps_var", str(settings.get("max_rps", "0") or "0"))
         _set_var("_roe_delay_ms_var", str(settings.get("delay_ms", "0") or "0"))
+        # Path-мутации отключены в GUI (payloads в params/body/headers/cookies).
+        _set_var("_mut_path", False)
         _set_var("_scan_via_proxy_var", bool(settings.get("scan_via_proxy", False)))
         _set_entry("_roe_block_checks_entry",
                    settings.get("roe_block_checks",
@@ -5731,12 +5735,19 @@ class App(tk.Tk):
                 # Multi-boundary mutations: прокидываем, только если движок умеет.
                 for _kw, _var_name in (
                     ("do_cookies", "_mut_cookies"),
-                    ("do_path", "_mut_path"),
                     ("do_body_multipart", "_mut_multipart"),
                 ):
                     if _kw in _build_params:
-                        _var = getattr(self, _var_name, None)
+                        _var = self.__dict__.get(_var_name)
                         _build_kwargs[_kw] = bool(_var.get()) if _var is not None else True
+                # Path/directory-мутации GUI не использует никогда (payloads — только
+                # в параметры/тело/headers/cookies). _mut_path — compat no-op.
+                if "do_path" in _build_params:
+                    _build_kwargs["do_path"] = False
+                    self.log(
+                        "[SCAN] Path mutations disabled "
+                        "(payloads only in params/body/headers/cookies)"
+                    )
                 tasks = scanner_core.build_scan_tasks(**_build_kwargs)
             except Exception as _exc:
                 import traceback as _tb
@@ -6076,6 +6087,8 @@ class App(tk.Tk):
         except Exception:
             pass
         auth_failures = 0
+        auth_recovered = 0
+        auth_blocked = 0
         # engine-dev может назвать поле по-разному — поддерживаем варианты.
         for _auth_attr in ("auth_failure_count", "auth_failures", "unauth_count"):
             try:
@@ -6084,6 +6097,15 @@ class App(tk.Tk):
                 auth_failures = 0
             if auth_failures:
                 break
+        try:
+            _stats = runner.auth_stats() if hasattr(runner, "auth_stats") else {}
+        except Exception:
+            _stats = {}
+        try:
+            auth_recovered = int((_stats or {}).get("auth_recovered_count") or 0)
+            auth_blocked = int((_stats or {}).get("auth_blocked_count") or 0)
+        except Exception:
+            auth_recovered = auth_blocked = 0
         self._scan_runner = None
         self._scan_thread = None
         self._btn_run_scan.configure(state=tk.NORMAL)
@@ -6095,9 +6117,17 @@ class App(tk.Tk):
             self._refresh_results(reset=True)
         except Exception:
             pass
-        if auth_failures > 0:
+        if auth_failures > 0 and auth_recovered >= auth_failures:
+            # Все auth-challenge'ы были автоматически перелогинены (SessionManager):
+            # это НЕ потеря сессии — не пугаем модалкой «проверь Cookie/OTP».
             self.log(
-                f"[SCAN][AUTH] {auth_failures} response(s) with 401/403 — "
+                f"[SCAN][AUTH] {auth_failures} auth-challenge response(s); "
+                f"auto-relogin recovered {auth_recovered}× — session OK"
+            )
+        elif auth_failures > 0:
+            unresolved = max(0, auth_failures - auth_recovered)
+            self.log(
+                f"[SCAN][AUTH] {unresolved} response(s) with 401/403/auth-challenge — "
                 "possible expired session / missing authorization"
             )
             try:
@@ -6107,11 +6137,18 @@ class App(tk.Tk):
                         "{count} responses with 401/403 — the session may have "
                         "expired or authorization is needed; check Cookie/OTP/"
                         "auto-login.",
-                        count=auth_failures,
+                        count=unresolved,
                     ),
                 )
             except Exception:
                 pass
+        elif auth_blocked > 0:
+            # 403 при валидной сессии — WAF/фильтр/заблокированный payload,
+            # а не проблема авторизации: только informational, без модалки.
+            self.log(
+                f"[SCAN][AUTH] {auth_blocked} response(s) 403 with valid session "
+                "— informational (WAF/filter/blocked payload), auth is OK"
+            )
 
     # ──────────────────────────── Results ────────────────────────────
 

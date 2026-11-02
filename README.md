@@ -78,6 +78,19 @@
   0 = без ограничения. После скана в лог пишется фактическая скорость
   (`[SCAN] Speed: … tasks/s`, `Rate limit applied: slots/waits`), чтобы эффект был виден.
   Старое Settings→ROE «Max requests/sec» убрано (оно больше не переопределяет новые поля).
+- **Понятная auth-диагностика после скана** — 401/403 больше не пугают без причины:
+  настоящими auth-проблемами считаются 401, 403 без сессии и ответы с login-
+  challenge; **403 с валидной сессией** (WAF/фильтр/заблокированный payload) и
+  ответы мутаций login-формы идут только как informational. Если auto-relogin сам
+  восстановил сессию, модалка «проверь Cookie/OTP» не показывается —
+  `auto-relogin recovered N× — session OK`.
+- **Меньше FP отражений** — XSS/HTML-injection/SSI больше не флагуют простое эхо
+  payload'а: URL-encoded отражение (`%3Cscript%3E`) в HTML не считается XSS
+  (браузер его не декодирует), HTML-escaped/JSON/plain/404-эхо и SSI raw-echo
+  подавляются; остаются direct unescaped HTML/SSI execution и реальные ошибки.
+- **Payloads только в параметрах/теле/headers/cookies** — path/directory-мутации
+  (`/{directory}?any_param=test`) убраны из GUI-скана: чекбокса «Path segments»
+  больше нет, `do_path=False` всегда; это убирает 403/404-шум и FP на directory.
 - **Авторизация из авто-логина применяется везде** — Cookie/Authorization
   активной сессии подставляются не только в payload-задачи, но и в preflight и
   probe-чеки; в Request detail сохраняются реально отправленные заголовки
@@ -189,7 +202,7 @@ make smoke    # headless GUI-смоук в xvfb на временной копи
 В репозитории есть самодостаточная HTTP-лаба (`tests/lab/`) с намеренно уязвимыми
 эндпоинтами (reflected XSS, escaped reflection, SQL-ошибки, редиректы, задержки,
 CSRF-форма, JSON API, cookie/CORS/SSRF/SSI-кейсы, чувствительные файлы/metafiles) —
-её используют 618 unit- и интеграционных тестов. Интеграционные тесты прокси
+её используют 662 unit- и интеграционных тестов. Интеграционные тесты прокси
 пропускаются автоматически, если mitmproxy или дисплей недоступны.
 
 ## Структура проекта
